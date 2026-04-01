@@ -1,0 +1,820 @@
+const {
+  loadConfig,
+  saveConfig,
+  fetchUserList,
+  listMangaItemsForManualLink,
+  searchManualLinkCandidates,
+  getManualLinkRuntimeStatus,
+  getAutoLinkCandidates,
+  getCachedAutoLinkCandidates,
+  buildBatchAutoLinkPreview,
+  warmAutoLinkCache,
+  checkSourcesHealth,
+  setManualLink,
+  removeManualLink,
+  enqueueFromList,
+  getSources
+} = require('../../cli-logic');
+const { ensurePrompt } = require('../shared/prompt');
+const { resolveEnqueuePrefs } = require('./enqueue-prefs');
+
+function ansi(text, code) {
+  return `\u001b[${code}m${text}\u001b[0m`;
+}
+
+function scoreLabel(score) {
+  const n = Number(score || 0);
+  if (n >= 90) return ansi(String(n), '92');
+  if (n >= 70) return ansi(String(n), '93');
+  return ansi(String(n), '91');
+}
+
+function chapterLabel(hasChapters) {
+  if (hasChapters === true) return ansi('chapters:ok', '92');
+  if (hasChapters === false) return ansi('chapters:none', '91');
+  return ansi('chapters:unknown', '90');
+}
+
+function linkedStateLabel(linked) {
+  return linked ? ansi('vinculado', '92') : ansi('sem-vinculo', '91');
+}
+
+function printLinksConfigSummary(cfg) {
+  const langs = Array.isArray(cfg.preferredSearchLangs) && cfg.preferredSearchLangs.length
+    ? cfg.preferredSearchLangs.join(',')
+    : 'all';
+  const sourceLimit = Number(cfg.maxExtensionsForAutoLink || 12);
+  const sourceConcurrency = Number(cfg.autoLinkSourceConcurrency || cfg.maxSourcesInParallel || 8);
+  const cacheTtl = Number(cfg.linkCacheTtlMinutes || 720);
+  const cleanup = cfg.cleanupLibraryDuplicates !== false ? 'on' : 'off';
+  console.log(`\n[CFG] langs=${langs} | maxSources=${sourceLimit} | parallel=${sourceConcurrency} | cacheTtl=${cacheTtl}m | dedupeLibrary=${cleanup}`);
+}
+
+function filterSourcesByConfig(sources, cfg) {
+  let out = Array.isArray(sources) ? [...sources] : [];
+
+  const langs = Array.isArray(cfg.preferredSearchLangs)
+    ? cfg.preferredSearchLangs.map(x => String(x || '').toLowerCase()).filter(Boolean)
+    : [];
+  if (langs.length) {
+    const langSet = new Set(langs);
+    out = out.filter(s => langSet.has(String(s && s.lang || '').toLowerCase()));
+  }
+
+  if (cfg.fixedSourceId != null && String(cfg.fixedSourceId).trim() !== '') {
+    const target = String(cfg.fixedSourceId).trim();
+    out = out.filter(s => String(s && s.id) === target);
+  }
+
+  return out;
+}
+
+async function updateAniListSnapshot(prompt) {
+  const cfg = loadConfig();
+  let username = String(cfg.usernameAnilist || '').trim();
+  if (!username) {
+    const ans = await prompt([{ name: 'user', message: 'Usuario AniList', default: '' }]);
+    username = String(ans.user || '').trim();
+  }
+  if (!username) {
+    console.log('Usuario AniList nao informado.');
+    return false;
+  }
+
+  console.log(`[LISTA] Atualizando lista AniList de ${username}...`);
+  const { mapped, readingLike } = await fetchUserList('anilist', username);
+  console.log(`[LISTA] Total=${mapped.length}, leitura/pausado=${readingLike.length}`);
+  return true;
+}
+
+async function showUnifiedList(rows, prompt) {
+  const cfg = loadConfig();
+  const ans = await prompt([
+    {
+      name: 'limit',
+      message: 'Quantos itens listar?',
+      default: 80,
+      validate: (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 1 && n <= 300 ? true : 'Digite um numero entre 1 e 300';
+      }
+    },
+    {
+      type: 'confirm',
+      name: 'showSuggestions',
+      message: 'Mostrar sugestoes do cache local?',
+      default: true
+    },
+    {
+      type: 'confirm',
+      name: 'allowOnlineFallback',
+      message: 'Para itens sem cache, buscar online agora?',
+      default: false,
+      when: (a) => a.showSuggestions
+    }
+  ]);
+
+  const limit = Number(ans.limit) || 80;
+  const selected = rows.slice(0, limit);
+
+  let previewsByKey = new Map();
+  if (ans.showSuggestions) {
+    if (ans.allowOnlineFallback) {
+      const previews = await buildBatchAutoLinkPreview({
+        onlyUnlinked: false,
+        limit,
+        concurrency: 8,
+        maxSourcesToTry: Number(cfg.maxExtensionsForAutoLink || 12),
+        useCache: true,
+        forceRefresh: false
+      });
+      previewsByKey = new Map(previews.map(p => [String(p.key), p]));
+    } else {
+      selected.forEach(r => {
+        const preview = getCachedAutoLinkCandidates(r.item, {
+          maxSourcesToTry: Number(cfg.maxExtensionsForAutoLink || 12),
+          verifyChapters: true
+        });
+        previewsByKey.set(String(r.key), {
+          key: r.key,
+          item: r.item,
+          linked: r.linked || null,
+          best: preview.best || null,
+          sources: Array.isArray(preview.sources) ? preview.sources : [],
+          cached: Boolean(preview.cached)
+        });
+      });
+    }
+  }
+
+  console.log('\n[LISTA] AniList e vinculos');
+  selected.forEach((r, i) => {
+    const preview = previewsByKey.get(String(r.key));
+    const linkLabel = r.linked
+      ? `${r.linked.sourceName || r.linked.sourceId} / ${r.linked.mangaTitle}`
+      : 'sem vinculo';
+
+    const best = preview && preview.best
+      ? `${preview.best.sourceName} / ${preview.best.mangaTitle} (score=${scoreLabel(preview.best.score)}${preview.best.matchedAgainst ? `, match='${preview.best.matchedAgainst}'` : ''}${preview.cached ? ', cache' : ''})`
+      : (ans.showSuggestions && !ans.allowOnlineFallback ? 'sem sugestao em cache' : 'sem sugestao');
+
+    const sourcesLine = preview && Array.isArray(preview.sources) && preview.sources.length
+      ? preview.sources
+        .slice(0, 3)
+        .map(s => {
+          const top = Array.isArray(s.mangas) && s.mangas[0] ? s.mangas[0] : null;
+          if (!top) return `${s.sourceName}[${s.lang}]`;
+          return `${s.sourceName}[${s.lang}](${scoreLabel(top.score)} ${chapterLabel(top.hasChapters)})`;
+        })
+        .join(' | ')
+      : 'sem fontes';
+
+    console.log(`${i + 1}. ${r.item.title}`);
+    if (Array.isArray(r.item.altTitles) && r.item.altTitles.length) {
+      console.log(`   Alt: ${r.item.altTitles.slice(0, 4).join(' | ')}`);
+    }
+    console.log(`   Vinculo: ${linkLabel}`);
+    console.log(`   Sugestao: ${best}`);
+    console.log(`   Fontes: ${sourcesLine}`);
+  });
+}
+
+async function runSourceHealthCheck(prompt) {
+  const cfg = loadConfig();
+  const ans = await prompt([
+    {
+      name: 'maxSourcesToTry',
+      message: 'Quantas fontes testar?',
+      default: Number(cfg.maxExtensionsForAutoLink || 12),
+      validate: (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 1 && n <= 50 ? true : 'Digite um numero entre 1 e 50';
+      }
+    },
+    {
+      name: 'probeTerm',
+      message: 'Termo de teste',
+      default: 'one piece'
+    }
+  ]);
+
+  console.log('[HEALTH] Testando fontes (inclui detecao de erro 500)...');
+  const result = await checkSourcesHealth({
+    maxSourcesToTry: Number(ans.maxSourcesToTry) || Number(cfg.maxExtensionsForAutoLink || 12),
+    probeTerm: ans.probeTerm || 'one piece'
+  });
+
+  console.log(`[HEALTH] Total=${result.total} | OK=${result.ok} | Falhas=${result.failed}`);
+  result.rows.forEach((r, i) => {
+    if (r.ok) {
+      console.log(`${i + 1}. OK ${r.sourceName} [${r.lang}] resultados=${r.sampleResults}`);
+      return;
+    }
+    const status = r.httpStatus ? `HTTP ${r.httpStatus}` : 'sem status HTTP';
+    const marker = Number(r.httpStatus) === 500 ? ' [ERRO 500]' : '';
+    console.log(`${i + 1}. FAIL ${r.sourceName} [${r.lang}] ${status}${marker} -> ${r.error || 'erro desconhecido'}`);
+  });
+}
+
+async function runBatchAutoMatch(rows, prompt) {
+  const cfg = loadConfig();
+  const defaultBatchLimit = Number(cfg.autoLinkBatchLimit || 80);
+  const defaultBatchConcurrency = Number(cfg.autoLinkBatchConcurrency || 12);
+  const defaultSourceConcurrency = Number(cfg.autoLinkSourceConcurrency || cfg.maxSourcesInParallel || 20);
+  const defaultSourcesToTry = Number(cfg.maxExtensionsForAutoLink || 12);
+  const defaultMinScore = Number(cfg.autoLinkMinScore || 90);
+  const defaultCacheOnly = Boolean(cfg.autoLinkCacheOnly);
+  const opts = await prompt([
+    {
+      type: 'list',
+      name: 'mode',
+      message: 'Modo de varredura',
+      choices: [
+        { name: 'Atualizar todos os vinculos da lista', value: 'all' },
+        { name: 'Somente itens sem vinculo', value: 'missing' }
+      ],
+      default: 'missing'
+    },
+    {
+      name: 'limit',
+      message: 'Quantos itens processar no lote?',
+      default: defaultBatchLimit,
+      validate: (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 1 && n <= 2000 ? true : 'Digite um numero entre 1 e 2000';
+      }
+    },
+    {
+      name: 'concurrency',
+      message: 'Paralelismo por item (1-40)',
+      default: defaultBatchConcurrency,
+      validate: (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 1 && n <= 40 ? true : 'Digite um numero entre 1 e 40';
+      }
+    },
+    {
+      name: 'sourceConcurrency',
+      message: 'Paralelismo entre fontes por manga (1-40)',
+      default: defaultSourceConcurrency,
+      validate: (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 1 && n <= 40 ? true : 'Digite um numero entre 1 e 40';
+      }
+    },
+    {
+      name: 'maxSourcesToTry',
+      message: 'Max fontes por item (1-50)',
+      default: defaultSourcesToTry,
+      validate: (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 1 && n <= 50 ? true : 'Digite um numero entre 1 e 50';
+      }
+    },
+    {
+      type: 'confirm',
+      name: 'cacheOnly',
+      message: 'Usar apenas cache (sem buscar online)?',
+      default: defaultCacheOnly
+    },
+    {
+      type: 'confirm',
+      name: 'forceRefresh',
+      message: 'Ignorar cache e refazer busca agora?',
+      default: false,
+      when: (a) => !a.cacheOnly
+    },
+    {
+      type: 'confirm',
+      name: 'autoApply',
+      message: 'Aplicar automaticamente sugestoes acima do score minimo?',
+      default: true
+    },
+    {
+      name: 'autoAcceptScore',
+      message: 'Score minimo para aplicacao automatica (60-99)',
+      default: defaultMinScore,
+      when: (a) => a.autoApply,
+      validate: (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 60 && n <= 99 ? true : 'Digite um numero entre 60 e 99';
+      }
+    }
+  ]);
+
+  const onlyUnlinked = opts.mode === 'missing';
+
+  cfg.autoLinkBatchLimit = Math.max(1, Math.min(2000, Number(opts.limit) || defaultBatchLimit));
+  cfg.autoLinkBatchConcurrency = Math.max(1, Math.min(40, Number(opts.concurrency) || defaultBatchConcurrency));
+  cfg.autoLinkSourceConcurrency = Math.max(1, Math.min(40, Number(opts.sourceConcurrency) || defaultSourceConcurrency));
+  cfg.maxExtensionsForAutoLink = Math.max(1, Math.min(50, Number(opts.maxSourcesToTry) || defaultSourcesToTry));
+  cfg.autoLinkCacheOnly = Boolean(opts.cacheOnly);
+  cfg.autoLinkMinScore = Math.max(60, Math.min(99, Number(opts.autoAcceptScore || defaultMinScore)));
+  saveConfig(cfg);
+
+  console.log('[BATCH] Aquecendo cache e varrendo lista...');
+  let lastProgressAt = 0;
+  const warm = await warmAutoLinkCache({
+    onlyUnlinked,
+    limit: Number(opts.limit) || 80,
+    concurrency: Number(opts.concurrency) || 10,
+    maxSourcesToTry: Number(opts.maxSourcesToTry) || Number(cfg.maxExtensionsForAutoLink || 12),
+    searchConcurrency: Number(opts.sourceConcurrency) || Number(cfg.autoLinkSourceConcurrency || cfg.maxSourcesInParallel || 20),
+    forceRefresh: Boolean(opts.forceRefresh),
+    cacheOnly: Boolean(opts.cacheOnly),
+    verifyChapters: true,
+    onProgress: (p) => {
+      const now = Date.now();
+      if (now - lastProgressAt < 400) return;
+      lastProgressAt = now;
+      process.stdout.write(`\r[BATCH] Progresso: ${p.done}/${p.total} | sugestoes=${p.withBest} | cacheHit=${p.cacheHits} | erros=${p.errors}`);
+    }
+  });
+  process.stdout.write('\n');
+  console.log(`[BATCH] Cache: total=${warm.total}, comSugestao=${warm.withBest}, cacheHit=${warm.cacheHits}, erros=${warm.errors}`);
+
+  const previewRows = await buildBatchAutoLinkPreview({
+    onlyUnlinked,
+    limit: Number(opts.limit) || 80,
+    concurrency: Number(opts.concurrency) || 10,
+    maxSourcesToTry: Number(opts.maxSourcesToTry) || Number(cfg.maxExtensionsForAutoLink || 12),
+    searchConcurrency: Number(opts.sourceConcurrency) || Number(cfg.autoLinkSourceConcurrency || cfg.maxSourcesInParallel || 20),
+    verifyChapters: true,
+    useCache: true,
+    forceRefresh: false,
+    cacheOnly: Boolean(opts.cacheOnly)
+  });
+
+  if (!previewRows.length) {
+    console.log('Nenhum item retornado no lote.');
+    return;
+  }
+
+  previewRows.forEach((r, i) => {
+    if (r.best) {
+      const sourcesLine = Array.isArray(r.sources) && r.sources.length
+        ? r.sources
+          .slice(0, 3)
+          .map(s => {
+            const top = Array.isArray(s.mangas) && s.mangas[0] ? s.mangas[0] : null;
+            if (!top) return `${s.sourceName}[${s.lang}]`;
+            return `${s.sourceName}[${s.lang}](${scoreLabel(top.score)} ${chapterLabel(top.hasChapters)})`;
+          })
+          .join(' | ')
+        : 'sem fontes';
+      console.log(`${i + 1}. ${r.item.title} => ${r.best.sourceName} / ${r.best.mangaTitle} (score=${scoreLabel(r.best.score)}${r.best.matchedAgainst ? `, match='${r.best.matchedAgainst}'` : ''}${r.cached ? ', cache' : ''})`);
+      console.log(`   Fontes: ${sourcesLine}`);
+    } else {
+      console.log(`${i + 1}. ${r.item.title} => sem sugestao`);
+    }
+  });
+
+  const minScore = Number(opts.autoAcceptScore || 90);
+  const withSuggestion = previewRows.filter(r => r.best).length;
+  const withoutSuggestion = previewRows.length - withSuggestion;
+  const belowScore = previewRows.filter(r => r.best && Number(r.best.score || 0) < minScore).length;
+  const acceptedByRule = previewRows.filter(r => r.best && Number(r.best.score || 0) >= minScore).length;
+  console.log(`[BATCH] Transparencia: total=${previewRows.length} | comSugestao=${withSuggestion} | semSugestao=${withoutSuggestion} | abaixoScore(${minScore})=${belowScore} | elegiveisAuto=${acceptedByRule}`);
+
+  let selectedKeys = [];
+  if (opts.autoApply) {
+    selectedKeys = previewRows
+      .filter(r => r.best && Number(r.best.score || 0) >= minScore)
+      .map(r => String(r.key));
+    const autoRejectedRows = previewRows
+      .filter(r => r.best && Number(r.best.score || 0) < minScore)
+      .slice(0, 20);
+    if (autoRejectedRows.length) {
+      console.log('[BATCH] Rejeitados no auto-apply (top 20):');
+      autoRejectedRows.forEach((r, idx) => {
+        console.log(`  ${idx + 1}. ${r.item.title} | score=${Number(r.best.score || 0)} < min=${minScore}`);
+      });
+    }
+
+    const noSuggestionRows = previewRows.filter(r => !r.best).slice(0, 20);
+    if (noSuggestionRows.length) {
+      console.log('[BATCH] Sem sugestao (top 20):');
+      noSuggestionRows.forEach((r, idx) => {
+        const reason = opts.cacheOnly
+          ? 'cache sem entrada para esse item'
+          : 'nenhum candidato valido nas fontes/filtros';
+        console.log(`  ${idx + 1}. ${r.item.title} | ${reason}`);
+      });
+    }
+  } else {
+    const choices = previewRows
+      .filter(r => r.best)
+      .map(r => ({
+        name: `${r.item.title} => ${r.best.sourceName} / ${r.best.mangaTitle} (score=${r.best.score})`,
+        value: r.key,
+        checked: Number(r.best.score || 0) >= 90
+      }));
+
+    if (!choices.length) {
+      console.log('Sem sugestoes validas para aceitar neste lote.');
+      return;
+    }
+
+    const accept = await prompt([
+      {
+        type: 'checkbox',
+        name: 'keys',
+        message: 'Selecione os vinculos para salvar',
+        pageSize: 20,
+        choices
+      }
+    ]);
+    selectedKeys = (accept.keys || []).map(String);
+  }
+
+  if (!selectedKeys.length) {
+    console.log('Nenhum vinculo selecionado para salvar.');
+    return;
+  }
+
+  let savedCount = 0;
+  previewRows.forEach(r => {
+    if (!r.best) return;
+    if (!selectedKeys.includes(String(r.key))) return;
+    setManualLink(r.item, {
+      sourceId: r.best.sourceId,
+      sourceName: r.best.sourceName,
+      mangaId: r.best.mangaId,
+      mangaTitle: r.best.mangaTitle
+    });
+    savedCount += 1;
+  });
+  console.log(`[BATCH] Vinculos salvos: ${savedCount}`);
+
+  const runAns = await prompt([
+    {
+      type: 'confirm',
+      name: 'runNow',
+      message: 'Baixar agora os itens vinculados neste lote?',
+      default: true
+    }
+  ]);
+
+  if (runAns.runNow) {
+    const cfgNow = loadConfig();
+    const prefs = resolveEnqueuePrefs(cfgNow);
+    console.log('[BATCH] Enqueue imediato dos itens selecionados...');
+    const run = await enqueueFromList({
+      dry: false,
+      priority: prefs.priority,
+      allowedLangs: prefs.allowedLangs,
+      sourceOrderIds: prefs.sourceOrderIds,
+      itemKeysFilter: selectedKeys,
+      limit: selectedKeys.length,
+      onItem: (row) => {
+        if (row.skipped) {
+          console.log(`[SKIP] ${row.item.title} (${row.reason || 'skip'})`);
+          return;
+        }
+        if (row.ok) {
+          if (row.result && row.result.fallbackUsed) {
+            const persisted = row.result.linkUpdated ? ' [linkPadraoAtualizado]' : '';
+            console.log(`[RUN] ${row.item.title} => indexes=${row.result.queuedChapterIndexes.join(',')} [fallback=${row.result.fallbackSourceName || 'auto'} / ${row.result.fallbackMangaTitle || ''}]${persisted}`);
+          } else {
+            console.log(`[RUN] ${row.item.title} => indexes=${row.result.queuedChapterIndexes.join(',')}`);
+          }
+        } else {
+          console.log(`[FAIL] ${row.item.title}: ${row.error}`);
+        }
+      }
+    });
+
+    const ok = run.output.filter(x => x.ok).length;
+    const failed = run.output.filter(x => x.ok === false).length;
+    console.log(`[BATCH] Download summary: success=${ok}, failed=${failed}`);
+  }
+}
+
+async function runAutoLinkReview(rows, prompt) {
+  const opts = await prompt([
+    {
+      type: 'confirm',
+      name: 'onlyUnlinked',
+      message: 'Revisar apenas itens sem vinculo?',
+      default: true
+    },
+    {
+      name: 'limit',
+      message: 'Quantos itens revisar agora?',
+      default: 30,
+      validate: (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 1 && n <= 300 ? true : 'Digite um numero entre 1 e 300';
+      }
+    }
+  ]);
+
+  const queue = (opts.onlyUnlinked ? rows.filter(r => !r.linked) : rows).slice(0, Number(opts.limit));
+  if (!queue.length) {
+    console.log('Nenhum item para revisar.');
+    return;
+  }
+
+  for (const row of queue) {
+    const item = row.item;
+    const preview = await getAutoLinkCandidates(item, { useCache: true, maxSourcesToTry: 15, verifyChapters: true });
+    const best = (preview.best && preview.best.sourceId && Number.isFinite(Number(preview.best.mangaId)))
+      ? preview.best
+      : null;
+
+    console.log('\n[REVIEW] AniList:', item.title);
+    if (Array.isArray(item.altTitles) && item.altTitles.length) {
+      console.log('[REVIEW] Titulos alternativos:', item.altTitles.slice(0, 6).join(' | '));
+    }
+
+    if (best) {
+      console.log(`[REVIEW] Sugestao: ${best.sourceName} -> ${best.mangaTitle} (id=${best.mangaId}, score=${scoreLabel(best.score)}${best.matchedAgainst ? `, match='${best.matchedAgainst}'` : ''}${preview.cached ? ', cache' : ''})`);
+    } else {
+      console.log('[REVIEW] Sem sugestao automatica para este item.');
+    }
+
+    const step = await prompt([
+      {
+        type: 'list',
+        name: 'act',
+        message: 'Acao deste item',
+        choices: [
+          'Aceitar sugestao',
+          'Ver top 5 por fonte',
+          'Pular item',
+          'Parar revisao'
+        ]
+      }
+    ]);
+
+    if (step.act === 'Parar revisao') break;
+    if (step.act === 'Pular item') continue;
+
+    if (step.act === 'Aceitar sugestao') {
+      if (!best) {
+        console.log('Sem sugestao para aceitar.');
+        continue;
+      }
+
+      const saved = setManualLink(item, {
+        sourceId: best.sourceId,
+        sourceName: best.sourceName,
+        mangaId: best.mangaId,
+        mangaTitle: best.mangaTitle
+      });
+      row.linked = saved;
+      console.log(`Vinculo salvo: ${item.title} => ${saved.sourceName || saved.sourceId} / ${saved.mangaTitle}`);
+      continue;
+    }
+
+    if (!Array.isArray(preview.sources) || !preview.sources.length) {
+      console.log('Sem candidatos para mostrar.');
+      continue;
+    }
+
+    const flatChoices = [];
+    preview.sources.forEach(src => {
+      console.log(`- ${src.sourceName} [${src.lang}]`);
+      src.mangas.forEach(m => {
+        console.log(`  ${m.title} (${m.id}) score=${scoreLabel(m.score)} ${chapterLabel(m.hasChapters)}`);
+        flatChoices.push({
+          name: `${src.sourceName} [${src.lang}] -> ${m.title} (${m.id}) score=${m.score} ${m.hasChapters === false ? '[sem capitulos]' : ''}`,
+          value: JSON.stringify({
+            sourceId: src.sourceId,
+            sourceName: src.sourceName,
+            mangaId: m.id,
+            mangaTitle: m.title
+          })
+        });
+      });
+    });
+
+    const pick = await prompt([
+      {
+        type: 'list',
+        name: 'chosen',
+        message: 'Escolha o candidato correto para vincular',
+        pageSize: 20,
+        choices: [
+          ...flatChoices,
+          { name: 'Voltar sem salvar', value: '__skip__' }
+        ]
+      }
+    ]);
+
+    if (pick.chosen === '__skip__') continue;
+    const parsed = JSON.parse(pick.chosen);
+    const saved = setManualLink(item, parsed);
+    row.linked = saved;
+    console.log(`Vinculo salvo: ${item.title} => ${saved.sourceName || saved.sourceId} / ${saved.mangaTitle}`);
+  }
+}
+
+async function createOrUpdateLink(rows, prompt) {
+  await showUnifiedList(rows, prompt);
+
+  const pickItem = await prompt([
+    {
+      type: 'list',
+      name: 'key',
+      message: 'Escolha o manga da sua lista',
+      pageSize: 20,
+      choices: rows.slice(0, 300).map(r => ({
+        name: `${linkedStateLabel(r.linked)} ${r.item.title} [${r.item.source}]${r.linked ? ` -> ${r.linked.sourceName || r.linked.sourceId}` : ''}`,
+        value: r.key
+      }))
+    }
+  ]);
+
+  const selected = rows.find(r => r.key === pickItem.key);
+  if (!selected) return;
+
+  const runtime = await getManualLinkRuntimeStatus(selected.item);
+  const runtimeLink = runtime && runtime.linked
+    ? `${runtime.linked.sourceName || runtime.linked.sourceId} / ${runtime.linked.mangaTitle}`
+    : 'sem vinculo';
+
+  console.log(`\n[ITEM] ${ansi(selected.item.title, '96')}`);
+  if (Array.isArray(selected.item.altTitles) && selected.item.altTitles.length) {
+    console.log(`[ITEM] Alt: ${selected.item.altTitles.slice(0, 6).join(' | ')}`);
+  }
+  console.log(`[ITEM] Vinculo atual: ${runtimeLink}`);
+  if (runtime && runtime.linked) {
+    if (runtime.ok) {
+      console.log(`[ITEM] Suwayomi: ${chapterLabel(runtime.hasChapters)} | baixados=${ansi(String(runtime.downloadedCount || 0), '93')} / total=${runtime.chapterCount || 0} | maxCap=${runtime.maxDownloaded || 0}`);
+    } else {
+      console.log(`[ITEM] Suwayomi: ${ansi('erro ao consultar', '91')} (${runtime.error || 'erro desconhecido'})`);
+    }
+  }
+
+  const action = await prompt([
+    {
+      type: 'list',
+      name: 'mode',
+      message: `Acao para ${selected.item.title}`,
+      choices: [
+        'Criar ou ajustar vinculo',
+        'Remover vinculo',
+        'Voltar'
+      ]
+    }
+  ]);
+
+  if (action.mode === 'Voltar') return;
+  if (action.mode === 'Remover vinculo') {
+    if (!selected.linked) {
+      console.log('Este item nao possui vinculo salvo.');
+      return;
+    }
+    removeManualLink(selected.item);
+    selected.linked = null;
+    console.log(`Vinculo removido: ${selected.item.title}`);
+    return;
+  }
+
+  const cfg = loadConfig();
+  const sources = await getSources();
+  if (!Array.isArray(sources) || !sources.length) {
+    console.log('Sem fontes instaladas no Suwayomi.');
+    return;
+  }
+
+  const filteredSources = filterSourcesByConfig(sources, cfg);
+  if (!filteredSources.length) {
+    console.log('Nenhuma fonte apos aplicar filtros atuais de configuracao (idioma/fonte fixa).');
+    return;
+  }
+
+  if (selected.linked) {
+    console.log(`[LINK] Atual: ${selected.linked.sourceName || selected.linked.sourceId} / ${selected.linked.mangaTitle} (${selected.linked.mangaId})`);
+  }
+
+  const pickSource = await prompt([
+    {
+      type: 'list',
+      name: 'sourceId',
+      message: `Escolha a fonte para ${selected.item.title}`,
+      pageSize: 20,
+      choices: filteredSources.map(s => ({
+        name: `${s.name} [${s.lang}] (${s.id})${selected.linked && String(selected.linked.sourceId) === String(s.id) ? ` ${ansi('[atual]', '92')}` : ''}`,
+        value: String(s.id)
+      }))
+    }
+  ]);
+
+  const source = filteredSources.find(s => String(s.id) === String(pickSource.sourceId));
+  const queryAns = await prompt([
+    {
+      name: 'q',
+      message: 'Texto de busca na fonte',
+      default: selected.item.title || selected.item.searchKey || ''
+    }
+  ]);
+
+  const candidates = await searchManualLinkCandidates(selected.item, String(pickSource.sourceId), queryAns.q);
+  if (!candidates.length) {
+    console.log('Nenhum resultado retornado para essa busca/fonte.');
+    return;
+  }
+
+  const pickManga = await prompt([
+    {
+      type: 'list',
+      name: 'mangaId',
+      message: 'Escolha o manga correto para vincular',
+      pageSize: 20,
+      choices: candidates.map(c => ({ name: `${c.title} (${c.id})`, value: String(c.id) }))
+    }
+  ]);
+
+  const manga = candidates.find(c => String(c.id) === String(pickManga.mangaId));
+  if (!manga) return;
+
+  const saved = setManualLink(selected.item, {
+    sourceId: String(pickSource.sourceId),
+    sourceName: source ? source.name : String(pickSource.sourceId),
+    mangaId: Number(manga.id),
+    mangaTitle: manga.title
+  });
+
+  selected.linked = saved;
+  console.log(`Vinculo salvo: ${selected.item.title} => ${saved.sourceName || saved.sourceId} / ${saved.mangaTitle}`);
+}
+
+async function manageManualLinksUI() {
+  const prompt = ensurePrompt();
+  try {
+    let rows = listMangaItemsForManualLink(2000);
+
+    while (true) {
+      const cfg = loadConfig();
+      printLinksConfigSummary(cfg);
+      const action = await prompt([
+        {
+          type: 'list',
+          name: 'act',
+          message: 'Vinculos AniList <-> fontes',
+          choices: [
+            'Atualizar lista do AniList',
+            'Ver lista completa (cache local)',
+            'Varrer lista automaticamente (rapido + cache)',
+            'Testar fontes (detectar erro 500)',
+            'Criar ou ajustar vinculo manual (inclui remover)',
+            'Voltar'
+          ]
+        }
+      ]);
+
+      if (action.act === 'Atualizar lista do AniList') {
+        const ok = await updateAniListSnapshot(prompt);
+        if (ok) rows = listMangaItemsForManualLink(2000);
+        continue;
+      }
+
+      if (action.act === 'Ver lista completa (cache local)') {
+        rows = listMangaItemsForManualLink(2000);
+        if (!rows.length) {
+          console.log('Nenhum item elegivel encontrado. Atualize a lista do AniList.');
+          continue;
+        }
+        await showUnifiedList(rows, prompt);
+        continue;
+      }
+
+      if (action.act === 'Varrer lista automaticamente (rapido + cache)') {
+        rows = listMangaItemsForManualLink(2000);
+        if (!rows.length) {
+          console.log('Nenhum item elegivel encontrado. Atualize a lista do AniList.');
+          continue;
+        }
+        await runBatchAutoMatch(rows, prompt);
+        rows = listMangaItemsForManualLink(2000);
+        continue;
+      }
+
+      if (action.act === 'Testar fontes (detectar erro 500)') {
+        await runSourceHealthCheck(prompt);
+        continue;
+      }
+
+      if (action.act === 'Criar ou ajustar vinculo manual (inclui remover)') {
+        rows = listMangaItemsForManualLink(2000);
+        if (!rows.length) {
+          console.log('Nenhum item elegivel encontrado. Atualize a lista do AniList.');
+          continue;
+        }
+        await createOrUpdateLink(rows, prompt);
+        rows = listMangaItemsForManualLink(2000);
+        continue;
+      }
+
+      if (action.act === 'Voltar') return;
+    }
+  } catch (e) {
+    console.error('Falha no gerenciamento de vinculos:', e.message);
+  }
+}
+
+module.exports = {
+  manageManualLinksUI
+};
