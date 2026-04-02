@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const axios = require('axios');
 const { execFileSync } = require('child_process');
 
@@ -27,27 +28,106 @@ const {
   waitForDownloadsToFinish
 } = require('./bridge');
 
-const CONFIG_PATH = path.join(__dirname, '..', 'data', 'config.json');
-const LIST_PATH = path.join(__dirname, '..', 'data', 'list.json');
-const DOWNLOADS_PATH = path.join(__dirname, '..', 'data', 'downloads.json');
-const LINK_CACHE_PATH = path.join(__dirname, '..', 'data', 'link-cache.json');
+const DEV_DATA_ROOT = path.join(__dirname, '..', 'data');
+const PACKAGED_STATE_ROOT = path.join(
+  process.env.APPDATA || path.join(os.homedir(), '.config'),
+  'manga-auto-pipeline'
+);
+const PACKAGED_BOOTSTRAP_PATH = path.join(PACKAGED_STATE_ROOT, 'runtime.json');
+const DEFAULT_MANAGED_DIR = path.join(os.homedir(), 'MangaPipeline');
+
+function readPackagedBootstrap() {
+  try {
+    const txt = fs.readFileSync(PACKAGED_BOOTSTRAP_PATH, 'utf8') || '{}';
+    const parsed = JSON.parse(txt);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch (e) {
+    // ignore
+  }
+  return {};
+}
+
+function writePackagedBootstrap(dataDir) {
+  if (!(process && process.pkg)) return;
+  const dir = String(dataDir || '').trim() || DEFAULT_MANAGED_DIR;
+  fs.mkdirSync(path.dirname(PACKAGED_BOOTSTRAP_PATH), { recursive: true });
+  fs.writeFileSync(PACKAGED_BOOTSTRAP_PATH, JSON.stringify({ dataDir: dir }, null, 2), 'utf8');
+}
+
+function resolveDataRoot(explicitDataDir = null) {
+  if (process && process.pkg) {
+    const bootstrap = readPackagedBootstrap();
+    const managedDir = String(explicitDataDir || bootstrap.dataDir || DEFAULT_MANAGED_DIR).trim() || DEFAULT_MANAGED_DIR;
+    return path.join(path.resolve(managedDir), 'data');
+  }
+  return DEV_DATA_ROOT;
+}
+
+function getDataPaths(explicitDataDir = null) {
+  const root = resolveDataRoot(explicitDataDir);
+  return {
+    root,
+    config: path.join(root, 'config.json'),
+    list: path.join(root, 'list.json'),
+    downloads: path.join(root, 'downloads.json'),
+    linkCache: path.join(root, 'link-cache.json')
+  };
+}
+
+function getConfigPath() {
+  return getDataPaths().config;
+}
+
+function getListPath() {
+  return getDataPaths().list;
+}
+
+function getDownloadsPath() {
+  return getDataPaths().downloads;
+}
+
+function getLinkCachePath() {
+  return getDataPaths().linkCache;
+}
+
+const CONFIG_PATH = getConfigPath();
+const LIST_PATH = getListPath();
+const DOWNLOADS_PATH = getDownloadsPath();
+const LINK_CACHE_PATH = getLinkCachePath();
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function loadConfig() {
+  const configPath = getConfigPath();
   try {
-    const txt = fs.readFileSync(CONFIG_PATH, 'utf8') || '{}';
-    return JSON.parse(txt);
+    const txt = fs.readFileSync(configPath, 'utf8') || '{}';
+    const cfg = JSON.parse(txt);
+    if (process && process.pkg) {
+      const bootstrap = readPackagedBootstrap();
+      cfg.dataDir = String(cfg.dataDir || bootstrap.dataDir || DEFAULT_MANAGED_DIR).trim() || DEFAULT_MANAGED_DIR;
+    }
+    return cfg;
   } catch (e) {
+    if (process && process.pkg) {
+      const bootstrap = readPackagedBootstrap();
+      return {
+        dataDir: String(bootstrap.dataDir || DEFAULT_MANAGED_DIR).trim() || DEFAULT_MANAGED_DIR
+      };
+    }
     return {};
   }
 }
 
 function saveConfig(cfg) {
-  fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf8');
+  const explicitDataDir = cfg && cfg.dataDir ? String(cfg.dataDir).trim() : null;
+  if (process && process.pkg && explicitDataDir) {
+    writePackagedBootstrap(explicitDataDir);
+  }
+  const configPath = getDataPaths(explicitDataDir).config;
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), 'utf8');
 }
 
 function upsertHoconLine(hoconText, key, rawValue) {
@@ -223,8 +303,9 @@ function normalizeSeriesKey(name) {
 }
 
 function readListRawAll() {
+  const listPath = getListPath();
   try {
-    const txt = fs.existsSync(LIST_PATH) ? (fs.readFileSync(LIST_PATH, 'utf8') || '[]') : '[]';
+    const txt = fs.existsSync(listPath) ? (fs.readFileSync(listPath, 'utf8') || '[]') : '[]';
     const parsed = JSON.parse(txt);
     return Array.isArray(parsed) ? parsed : [];
   } catch (e) {
@@ -1261,8 +1342,9 @@ async function fetchUserList(source, username) {
     return st === 'reading' || st === 'paused';
   });
 
-  fs.mkdirSync(path.dirname(LIST_PATH), { recursive: true });
-  fs.writeFileSync(LIST_PATH, JSON.stringify(mapped, null, 2), 'utf8');
+  const listPath = getListPath();
+  fs.mkdirSync(path.dirname(listPath), { recursive: true });
+  fs.writeFileSync(listPath, JSON.stringify(mapped, null, 2), 'utf8');
 
   return { mapped, readingLike };
 }
@@ -1354,9 +1436,10 @@ async function getSources() {
 }
 
 function readListForEnqueue() {
+  const listPath = getListPath();
   let raw = [];
   try {
-    const txt = fs.existsSync(LIST_PATH) ? (fs.readFileSync(LIST_PATH, 'utf8') || '[]') : '[]';
+    const txt = fs.existsSync(listPath) ? (fs.readFileSync(listPath, 'utf8') || '[]') : '[]';
     const parsed = JSON.parse(txt);
     raw = Array.isArray(parsed) ? parsed : [];
   } catch (e) {
@@ -1395,8 +1478,9 @@ function getItemProcessKey(item) {
 }
 
 function loadDownloadsRegistry() {
+  const downloadsPath = getDownloadsPath();
   try {
-    const txt = fs.readFileSync(DOWNLOADS_PATH, 'utf8') || '{}';
+    const txt = fs.readFileSync(downloadsPath, 'utf8') || '{}';
     const data = JSON.parse(txt);
     if (data && typeof data === 'object' && data.items && typeof data.items === 'object') {
       return data;
@@ -1408,8 +1492,9 @@ function loadDownloadsRegistry() {
 }
 
 function loadLinkCache() {
+  const linkCachePath = getLinkCachePath();
   try {
-    const txt = fs.readFileSync(LINK_CACHE_PATH, 'utf8') || '{}';
+    const txt = fs.readFileSync(linkCachePath, 'utf8') || '{}';
     const data = JSON.parse(txt);
     if (data && typeof data === 'object' && data.items && typeof data.items === 'object') {
       return data;
@@ -1421,8 +1506,9 @@ function loadLinkCache() {
 }
 
 function saveLinkCache(cache) {
-  fs.mkdirSync(path.dirname(LINK_CACHE_PATH), { recursive: true });
-  fs.writeFileSync(LINK_CACHE_PATH, JSON.stringify(cache, null, 2), 'utf8');
+  const linkCachePath = getLinkCachePath();
+  fs.mkdirSync(path.dirname(linkCachePath), { recursive: true });
+  fs.writeFileSync(linkCachePath, JSON.stringify(cache, null, 2), 'utf8');
 }
 
 function buildLinkCacheSignature(item, options, cfg) {
@@ -1526,8 +1612,9 @@ function chaptersAreAlreadyCovered(existingRequestedChapters, currentRequestedCh
 }
 
 function saveDownloadsRegistry(registry) {
-  fs.mkdirSync(path.dirname(DOWNLOADS_PATH), { recursive: true });
-  fs.writeFileSync(DOWNLOADS_PATH, JSON.stringify(registry, null, 2), 'utf8');
+  const downloadsPath = getDownloadsPath();
+  fs.mkdirSync(path.dirname(downloadsPath), { recursive: true });
+  fs.writeFileSync(downloadsPath, JSON.stringify(registry, null, 2), 'utf8');
 }
 
 function buildSearchTermsForItem(item) {
