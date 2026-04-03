@@ -1,0 +1,32 @@
+{
+  "menu": {
+    "settings": {
+      "title": "Configuracoes",
+      "general": "Configuracoes gerais",
+      "search": "Configuracoes de busca",
+      "extensions": "Gerenciar extensoes",
+      "links": "Gerenciar vinculos AniList <-> fontes",
+      "back": "Voltar"
+    },
+    "main": {
+      "title": "Menu principal",
+      "choice_settings": "Configuracoes",
+      "choice_start_pipeline": "Iniciar Suwayomi e downloads",
+      "choice_start_komga": "Iniciar Komga",
+      "choice_organize_komga": "Organizar biblioteca Komga (manual)",
+      "choice_cleanup_anilist": "Limpar capitulos lidos (AniList)",
+      "choice_cancel_downloads": "Cancelar downloads do Suwayomi",
+      "choice_exit": "Sair (Desligar todos os apps)"
+    }
+  },
+  "firstRun": {
+    "missingConfig": "Primeira execucao sem configuracao completa. Abrindo Configuracoes Gerais..."
+  },
+  "extensions": {
+    "requireSuwayomi": "Gerenciar extensoes requer Suwayomi ativo. Inicie o Suwayomi e tente novamente."
+  },
+  "downloads": {
+    "stopped": "Downloads do Suwayomi parados.",
+    "stopFailed": "Falha ao parar downloads do Suwayomi: {{error}}"
+  }
+}

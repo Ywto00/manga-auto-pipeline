@@ -3,8 +3,9 @@ const {
   isConfigComplete,
   stopDownloads,
   stopServer
-} = require('../../cli-logic');
-const { ensurePrompt } = require('../shared/prompt');
+} = require('../../interfaces/ui-cli/presenter');
+const { t } = require('../../interfaces/ui-cli/i18n');
+const { ensurePrompt } = require('../../interfaces/ui-cli/prompt');
 const { configureUI, searchSettingsUI } = require('./settings-menu');
 const { startPipelineUI, cleanupReadByAniListUI, organizeKomgaLibraryUI, startKomgaUI } = require('./pipeline-menu');
 const { manageExtensionsUI } = require('./extensions-menu');
@@ -18,34 +19,34 @@ async function settingsMenu() {
       {
         type: 'list',
         name: 'act',
-        message: 'Configuracoes',
+        message: t('menu.settings.title'),
         choices: [
-          'Configuracoes gerais',
-          'Configuracoes de busca',
-          'Gerenciar extensoes',
-          'Gerenciar vinculos AniList <-> fontes',
-          'Voltar'
+          t('menu.settings.general'),
+          t('menu.settings.search'),
+          t('menu.settings.extensions'),
+          t('menu.settings.links'),
+          t('menu.settings.back')
         ]
       }
     ]);
 
-    if (ans.act === 'Configuracoes gerais') await configureUI();
+    if (ans.act === t('menu.settings.general')) await configureUI();
 
-    if (ans.act === 'Configuracoes de busca') await searchSettingsUI();
+    if (ans.act === t('menu.settings.search')) await searchSettingsUI();
 
-    if (ans.act === 'Gerenciar extensoes') {
+    if (ans.act === t('menu.settings.extensions')) {
       try {
         await manageExtensionsUI();
       } catch (e) {
-        console.log('Gerenciar extensoes requer Suwayomi ativo. Inicie o Suwayomi e tente novamente.');
+        console.log(t('extensions.requireSuwayomi'));
       }
     }
 
-    if (ans.act === 'Gerenciar vinculos AniList <-> fontes') {
+    if (ans.act === t('menu.settings.links')) {
       await manageManualLinksUI();
     }
 
-    if (ans.act === 'Voltar') return;
+    if (ans.act === t('menu.settings.back')) return;
   }
 }
 
@@ -65,58 +66,58 @@ async function shutdownAll() {
 
 async function mainMenu() {
   const prompt = ensurePrompt();
-  const cfg = loadConfig();
-  if (!isConfigComplete(cfg)) {
-    console.log('Primeira execucao sem configuracao completa. Abrindo Configuracoes Gerais...');
-    await configureUI();
-  }
+    const cfg = loadConfig();
+    if (!isConfigComplete(cfg)) {
+      console.log(t('firstRun.missingConfig'));
+      await configureUI();
+    }
 
   while (true) {
     const ans = await prompt([
       {
         type: 'list',
         name: 'act',
-        message: 'Menu principal',
-        choices: [
-          'Configuracoes',
-          'Iniciar Suwayomi e downloads',
-          'Iniciar Komga',
-          'Organizar biblioteca Komga (manual)',
-          'Limpar capitulos lidos (AniList)',
-          'Cancelar downloads do Suwayomi',
-          'Sair (Desligar todos os apps)'
-        ]
+          message: t('menu.main.title'),
+          choices: [
+            t('menu.main.choice_settings'),
+            t('menu.main.choice_start_pipeline'),
+            t('menu.main.choice_start_komga'),
+            t('menu.main.choice_organize_komga'),
+            t('menu.main.choice_cleanup_anilist'),
+            t('menu.main.choice_cancel_downloads'),
+            t('menu.main.choice_exit')
+          ]
       }
     ]);
 
-    if (ans.act === 'Configuracoes') await settingsMenu();
+    if (ans.act === t('menu.main.choice_settings')) await settingsMenu();
 
-    if (ans.act === 'Iniciar Suwayomi e downloads') {
+    if (ans.act === t('menu.main.choice_start_pipeline')) {
       await startPipelineUI();
     }
 
-    if (ans.act === 'Iniciar Komga') {
+    if (ans.act === t('menu.main.choice_start_komga')) {
       await startKomgaUI();
     }
 
-    if (ans.act === 'Organizar biblioteca Komga (manual)') {
+    if (ans.act === t('menu.main.choice_organize_komga')) {
       await organizeKomgaLibraryUI();
     }
 
-    if (ans.act === 'Limpar capitulos lidos (AniList)') {
+    if (ans.act === t('menu.main.choice_cleanup_anilist')) {
       await cleanupReadByAniListUI();
     }
 
-    if (ans.act === 'Cancelar downloads do Suwayomi') {
-      try {
-        await stopDownloads();
-        console.log('Downloads do Suwayomi parados.');
-      } catch (e) {
-        console.log('Falha ao parar downloads do Suwayomi:', e.message);
-      }
+      if (ans.act === t('menu.main.choice_cancel_downloads')) {
+        try {
+          await stopDownloads();
+          console.log(t('downloads.stopped'));
+        } catch (e) {
+          console.log(t('downloads.stopFailed', { error: e.message }));
+        }
     }
 
-    if (ans.act === 'Sair (Desligar todos os apps)') {
+    if (ans.act === t('menu.main.choice_exit')) {
       await shutdownAll();
       process.exit(0);
     }

@@ -4,10 +4,10 @@ const os = require('os');
 const axios = require('axios');
 const { execFileSync } = require('child_process');
 
-const { fetchAniList, fetchAniListMediaById } = require('./anilist');
-const { fetchMAL } = require('./mal');
-const { normalize } = require('./normalize');
-const { postGraphQL } = require('./api-common');
+const { fetchAniList, fetchAniListMediaById } = require('./shared/adapters/anilist.adapter');
+const { fetchMAL } = require('./shared/adapters/mal.adapter');
+const { normalize } = require('./shared/utils/normalize');
+const { postGraphQL } = require('./shared/utils/api-common');
 const {
   startSuwayomiJar,
   startKomgaJar,
@@ -35,6 +35,7 @@ const PACKAGED_STATE_ROOT = path.join(
 );
 const PACKAGED_BOOTSTRAP_PATH = path.join(PACKAGED_STATE_ROOT, 'runtime.json');
 const DEFAULT_MANAGED_DIR = path.join(os.homedir(), 'MangaPipeline');
+const DATA_DIR_ENV_KEY = 'MANGA_PIPELINE_DATA_DIR';
 
 function readPackagedBootstrap() {
   try {
@@ -48,18 +49,52 @@ function readPackagedBootstrap() {
 }
 
 function writePackagedBootstrap(dataDir) {
-  if (!(process && process.pkg)) return;
   const dir = String(dataDir || '').trim() || DEFAULT_MANAGED_DIR;
   fs.mkdirSync(path.dirname(PACKAGED_BOOTSTRAP_PATH), { recursive: true });
   fs.writeFileSync(PACKAGED_BOOTSTRAP_PATH, JSON.stringify({ dataDir: dir }, null, 2), 'utf8');
 }
 
-function resolveDataRoot(explicitDataDir = null) {
-  if (process && process.pkg) {
-    const bootstrap = readPackagedBootstrap();
-    const managedDir = String(explicitDataDir || bootstrap.dataDir || DEFAULT_MANAGED_DIR).trim() || DEFAULT_MANAGED_DIR;
-    return path.join(path.resolve(managedDir), 'data');
+function hasConfigAt(root) {
+  if (!root) return false;
+  return fs.existsSync(path.join(root, 'config.json'));
+}
+
+function toDataRootFromDir(baseDir) {
+  const raw = String(baseDir || '').trim();
+  if (!raw) return null;
+  return path.join(path.resolve(raw), 'data');
+}
+
+function readDataDirFromConfigFile(configPath) {
+  try {
+    if (!configPath || !fs.existsSync(configPath)) return '';
+    const txt = fs.readFileSync(configPath, 'utf8') || '{}';
+    const parsed = JSON.parse(txt);
+    return String(parsed && parsed.dataDir || '').trim();
+  } catch (e) {
+    return '';
   }
+}
+
+function resolveDataRoot(explicitDataDir = null) {
+  if (explicitDataDir) {
+    return toDataRootFromDir(explicitDataDir);
+  }
+
+  const bootstrap = readPackagedBootstrap();
+  const envRoot = toDataRootFromDir(process.env[DATA_DIR_ENV_KEY]);
+  const bootstrapRoot = toDataRootFromDir(bootstrap.dataDir);
+  const legacyRepoConfigPath = path.join(DEV_DATA_ROOT, 'config.json');
+  const legacyDeclaredRoot = toDataRootFromDir(readDataDirFromConfigFile(legacyRepoConfigPath));
+  const defaultManagedRoot = toDataRootFromDir(DEFAULT_MANAGED_DIR);
+
+  const preferred = [envRoot, bootstrapRoot, legacyDeclaredRoot, defaultManagedRoot, DEV_DATA_ROOT].filter(Boolean);
+  for (const root of preferred) {
+    if (hasConfigAt(root)) return root;
+  }
+
+  // If no config exists yet, keep repo-data behavior in dev and managed behavior in packaged builds.
+  if (process && process.pkg) return defaultManagedRoot;
   return DEV_DATA_ROOT;
 }
 
@@ -104,25 +139,20 @@ function loadConfig() {
   try {
     const txt = fs.readFileSync(configPath, 'utf8') || '{}';
     const cfg = JSON.parse(txt);
-    if (process && process.pkg) {
-      const bootstrap = readPackagedBootstrap();
-      cfg.dataDir = String(cfg.dataDir || bootstrap.dataDir || DEFAULT_MANAGED_DIR).trim() || DEFAULT_MANAGED_DIR;
-    }
+    const bootstrap = readPackagedBootstrap();
+    cfg.dataDir = String(cfg.dataDir || bootstrap.dataDir || DEFAULT_MANAGED_DIR).trim() || DEFAULT_MANAGED_DIR;
     return cfg;
   } catch (e) {
-    if (process && process.pkg) {
-      const bootstrap = readPackagedBootstrap();
-      return {
-        dataDir: String(bootstrap.dataDir || DEFAULT_MANAGED_DIR).trim() || DEFAULT_MANAGED_DIR
-      };
-    }
-    return {};
+    const bootstrap = readPackagedBootstrap();
+    return {
+      dataDir: String(bootstrap.dataDir || DEFAULT_MANAGED_DIR).trim() || DEFAULT_MANAGED_DIR
+    };
   }
 }
 
 function saveConfig(cfg) {
   const explicitDataDir = cfg && cfg.dataDir ? String(cfg.dataDir).trim() : null;
-  if (process && process.pkg && explicitDataDir) {
+  if (explicitDataDir) {
     writePackagedBootstrap(explicitDataDir);
   }
   const configPath = getDataPaths(explicitDataDir).config;
@@ -1648,6 +1678,14 @@ function normalizeTitleLoose(s) {
     .trim();
 }
 
+function isChapterStrictlyBeforeProgress(chapterNumber, progress) {
+  const ch = Number(chapterNumber);
+  const p = Number(progress);
+  if (!Number.isFinite(ch) || !Number.isFinite(p)) return false;
+  // Keep current chapter; delete only older chapters (e.g., progress=210 -> delete <=209.x).
+  return ch < (p - 0.01);
+}
+
 function tokenizeTitleLoose(s) {
   const stop = new Set(['the', 'a', 'an', 'of', 'to', 'and', 'in', 'on', 'no', 'wa', 'ga', 'de', 'ni']);
   return normalizeTitleLoose(s)
@@ -2776,7 +2814,7 @@ async function deleteReadChaptersByAniList(options = {}) {
       const chapters = await getMangaChapters(client, mangaId, false);
       const toDelete = (Array.isArray(chapters) ? chapters : [])
         .filter(ch => Boolean(ch && ch.downloaded))
-        .filter(ch => Number.isFinite(Number(ch.chapterNumber)) && Number(ch.chapterNumber) <= progress + 0.01)
+        .filter(ch => isChapterStrictlyBeforeProgress(ch.chapterNumber, progress))
         .filter(ch => Number.isFinite(Number(ch.index)));
 
       let deleted = 0;

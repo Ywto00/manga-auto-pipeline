@@ -1,4 +1,4 @@
-const { postGraphQL } = require('./api-common');
+const { postGraphQL } = require('../utils/api-common');
 
 const QUERY = `
 query ($user: String) {

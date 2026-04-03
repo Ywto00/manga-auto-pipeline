@@ -1,12 +1,14 @@
-const { mainMenu } = require('./UI/cli-ui');
+const { bootstrap } = require('./composition/bootstrap');
+
+const ctx = bootstrap();
 
 if (require.main === module) {
-  mainMenu().catch(e => {
+  ctx.mainMenu().catch(e => {
     console.error(e);
     process.exit(1);
   });
 }
 
 module.exports = {
-  mainMenu
+  mainMenu: ctx.mainMenu
 };

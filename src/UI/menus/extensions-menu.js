@@ -1,4 +1,6 @@
 const {
+  loadConfig,
+  startServer,
   listRepos,
   addRepo,
   removeRepos,
@@ -6,7 +8,46 @@ const {
   getServerExtensions,
   installPackages
 } = require('../../cli-logic');
-const { ensurePrompt } = require('../shared/prompt');
+const { ensurePrompt } = require('../../interfaces/ui-cli/prompt');
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function ensureSuwayomiForExtensions() {
+  try {
+    await getServerExtensions();
+    return;
+  } catch (e) {
+    // Try auto-start below.
+  }
+
+  const cfg = loadConfig();
+  if (!cfg.jarPath || !cfg.dataDir) {
+    throw new Error('Configure o Suwayomi (JAR e pasta base) em Configuracoes gerais antes de gerenciar extensoes.');
+  }
+
+  console.log('[EXT] Suwayomi nao detectado. Iniciando automaticamente...');
+  const started = await startServer();
+  if (started.ready) {
+    console.log('[EXT] Suwayomi pronto para gerenciar extensoes.');
+    return;
+  }
+
+  // Give server a small extra window before failing the extension flow.
+  for (let i = 0; i < 6; i += 1) {
+    await sleep(600);
+    try {
+      await getServerExtensions();
+      console.log('[EXT] Suwayomi iniciado e conectado.');
+      return;
+    } catch (e) {
+      // keep retrying
+    }
+  }
+
+  throw new Error('Suwayomi iniciou em background, mas a API ainda nao respondeu. Tente novamente em alguns segundos.');
+}
 
 async function manageRepositoriesUI() {
   const prompt = ensurePrompt();
@@ -150,6 +191,7 @@ async function manageExtensionsServerUI() {
 
 async function manageExtensionsUI() {
   const prompt = ensurePrompt();
+  await ensureSuwayomiForExtensions();
   console.log('Gerenciar extensoes: primeiro configure repositorios, depois instale extensoes.');
   while (true) {
     const action = await prompt([

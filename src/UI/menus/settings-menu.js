@@ -9,8 +9,8 @@ const {
   applyConfigValues,
   getSources
 } = require('../../cli-logic');
-const { ensurePrompt } = require('../shared/prompt');
-const { pickFolderWithExplorer, chooseJarPath } = require('../shared/explorer-picker');
+const { ensurePrompt } = require('../../interfaces/ui-cli/prompt');
+const { pickFolderWithExplorer, chooseJarPath } = require('../../interfaces/ui-cli/explorer-picker');
 
 function findJarInBin(dataDir, matcher) {
   const binDir = path.join(dataDir, 'bin');

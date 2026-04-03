@@ -5,25 +5,7 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function postJson(url, data, opts = {}) {
-  const res = await axios.post(url, data, opts);
-  return res.data;
-}
-
-async function paginateAsync(fetchPage) {
-  const out = [];
-  let page = 1;
-  while (true) {
-    const { items, hasNext } = await fetchPage(page);
-    if (!items || items.length === 0) break;
-    out.push(...items);
-    if (!hasNext) break;
-    page++;
-  }
-  return out;
-}
-
-// MAL
+// HTTP GET with simple retry/backoff for network errors
 async function getJson(url, opts = {}) {
   const maxRetries = opts.retries || 3;
   const timeout = opts.timeout || 10000;
@@ -40,6 +22,24 @@ async function getJson(url, opts = {}) {
       await sleep(500 * Math.pow(2, attempt));
     }
   }
+}
+
+async function postJson(url, data, opts = {}) {
+  const res = await axios.post(url, data, opts);
+  return res.data;
+}
+
+async function paginateAsync(fetchPage) {
+  const out = [];
+  let page = 1;
+  while (true) {
+    const { items, hasNext } = await fetchPage(page);
+    if (!items || items.length === 0) break;
+    out.push(...items);
+    if (!hasNext) break;
+    page++;
+  }
+  return out;
 }
 
 // ANILIST

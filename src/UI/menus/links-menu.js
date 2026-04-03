@@ -5,7 +5,6 @@ const {
   listMangaItemsForManualLink,
   searchManualLinkCandidates,
   getManualLinkRuntimeStatus,
-  getAutoLinkCandidates,
   getCachedAutoLinkCandidates,
   buildBatchAutoLinkPreview,
   warmAutoLinkCache,
@@ -15,7 +14,7 @@ const {
   enqueueFromList,
   getSources
 } = require('../../cli-logic');
-const { ensurePrompt } = require('../shared/prompt');
+const { ensurePrompt } = require('../../interfaces/ui-cli/prompt');
 const { resolveEnqueuePrefs } = require('./enqueue-prefs');
 
 function ansi(text, code) {
@@ -37,6 +36,12 @@ function chapterLabel(hasChapters) {
 
 function linkedStateLabel(linked) {
   return linked ? ansi('vinculado', '92') : ansi('sem-vinculo', '91');
+}
+
+function truncateText(value, max = 68) {
+  const text = String(value || '').trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}...`;
 }
 
 function printLinksConfigSummary(cfg) {
@@ -88,7 +93,6 @@ async function updateAniListSnapshot(prompt) {
 }
 
 async function showUnifiedList(rows, prompt) {
-  const cfg = loadConfig();
   const ans = await prompt([
     {
       name: 'limit',
@@ -100,54 +104,43 @@ async function showUnifiedList(rows, prompt) {
       }
     },
     {
-      type: 'confirm',
-      name: 'showSuggestions',
-      message: 'Mostrar sugestoes do cache local?',
-      default: true
-    },
-    {
-      type: 'confirm',
-      name: 'allowOnlineFallback',
-      message: 'Para itens sem cache, buscar online agora?',
-      default: false,
-      when: (a) => a.showSuggestions
+      type: 'list',
+      name: 'viewMode',
+      message: 'Formato da lista',
+      choices: [
+        { name: 'Compacto (recomendado)', value: 'compact' },
+        { name: 'Detalhado', value: 'detailed' }
+      ],
+      default: 'compact'
     }
   ]);
 
   const limit = Number(ans.limit) || 80;
   const selected = rows.slice(0, limit);
+  const showSuggestions = true;
 
   let previewsByKey = new Map();
-  if (ans.showSuggestions) {
-    if (ans.allowOnlineFallback) {
-      const previews = await buildBatchAutoLinkPreview({
-        onlyUnlinked: false,
-        limit,
-        concurrency: 8,
-        maxSourcesToTry: Number(cfg.maxExtensionsForAutoLink || 12),
-        useCache: true,
-        forceRefresh: false
+  if (showSuggestions) {
+    selected.forEach(r => {
+      const preview = getCachedAutoLinkCandidates(r.item, {
+        maxSourcesToTry: 12,
+        verifyChapters: true
       });
-      previewsByKey = new Map(previews.map(p => [String(p.key), p]));
-    } else {
-      selected.forEach(r => {
-        const preview = getCachedAutoLinkCandidates(r.item, {
-          maxSourcesToTry: Number(cfg.maxExtensionsForAutoLink || 12),
-          verifyChapters: true
-        });
-        previewsByKey.set(String(r.key), {
-          key: r.key,
-          item: r.item,
-          linked: r.linked || null,
-          best: preview.best || null,
-          sources: Array.isArray(preview.sources) ? preview.sources : [],
-          cached: Boolean(preview.cached)
-        });
+      previewsByKey.set(String(r.key), {
+        key: r.key,
+        item: r.item,
+        linked: r.linked || null,
+        best: preview.best || null,
+        sources: Array.isArray(preview.sources) ? preview.sources : [],
+        cached: Boolean(preview.cached)
       });
-    }
+    });
   }
 
-  console.log('\n[LISTA] AniList e vinculos');
+  const linkedRows = selected.filter(r => Boolean(r.linked));
+  const unlinkedRows = selected.filter(r => !r.linked);
+  console.log(`\n[LISTA] AniList e vinculos | total=${selected.length} | vinculados=${linkedRows.length} | sem-vinculo=${unlinkedRows.length}`);
+
   selected.forEach((r, i) => {
     const preview = previewsByKey.get(String(r.key));
     const linkLabel = r.linked
@@ -156,7 +149,7 @@ async function showUnifiedList(rows, prompt) {
 
     const best = preview && preview.best
       ? `${preview.best.sourceName} / ${preview.best.mangaTitle} (score=${scoreLabel(preview.best.score)}${preview.best.matchedAgainst ? `, match='${preview.best.matchedAgainst}'` : ''}${preview.cached ? ', cache' : ''})`
-      : (ans.showSuggestions && !ans.allowOnlineFallback ? 'sem sugestao em cache' : 'sem sugestao');
+      : 'sem sugestao local';
 
     const sourcesLine = preview && Array.isArray(preview.sources) && preview.sources.length
       ? preview.sources
@@ -169,13 +162,27 @@ async function showUnifiedList(rows, prompt) {
         .join(' | ')
       : 'sem fontes';
 
-    console.log(`${i + 1}. ${r.item.title}`);
-    if (Array.isArray(r.item.altTitles) && r.item.altTitles.length) {
-      console.log(`   Alt: ${r.item.altTitles.slice(0, 4).join(' | ')}`);
+    if (ans.viewMode === 'compact') {
+      const statusTag = r.linked ? ansi('LINK', '92') : ansi('NO-LINK', '91');
+      const bestShort = preview && preview.best
+        ? `${preview.best.sourceName}/${truncateText(preview.best.mangaTitle, 30)} score=${Number(preview.best.score || 0)}${preview.cached ? ' cache' : ''}`
+        : 'sem sugestao';
+      console.log(`${String(i + 1).padStart(3, '0')}. [${statusTag}] ${truncateText(r.item.title, 62)}`);
+      console.log(`     vinculo: ${truncateText(linkLabel, 88)}`);
+      if (showSuggestions) console.log(`     sugestao: ${truncateText(bestShort, 88)}`);
+      return;
     }
-    console.log(`   Vinculo: ${linkLabel}`);
-    console.log(`   Sugestao: ${best}`);
-    console.log(`   Fontes: ${sourcesLine}`);
+
+    const headerStatus = r.linked ? ansi('LINK', '92') : ansi('NO-LINK', '91');
+    console.log(`${String(i + 1).padStart(3, '0')}. [${headerStatus}] ${r.item.title}`);
+    if (Array.isArray(r.item.altTitles) && r.item.altTitles.length) {
+      console.log(`     alt: ${truncateText(r.item.altTitles.slice(0, 4).join(' | '), 120)}`);
+    }
+    console.log(`     vinculo: ${truncateText(linkLabel, 120)}`);
+    if (showSuggestions) {
+      console.log(`     sugestao-local: ${truncateText(best, 120)}`);
+      console.log(`     fontes-local: ${truncateText(sourcesLine, 120)}`);
+    }
   });
 }
 
@@ -490,128 +497,44 @@ async function runBatchAutoMatch(rows, prompt) {
   }
 }
 
-async function runAutoLinkReview(rows, prompt) {
-  const opts = await prompt([
+async function createOrUpdateLink(rows, prompt) {
+  await showUnifiedList(rows, prompt);
+
+  const filterAns = await prompt([
     {
-      type: 'confirm',
-      name: 'onlyUnlinked',
-      message: 'Revisar apenas itens sem vinculo?',
-      default: true
+      type: 'list',
+      name: 'scope',
+      message: 'Filtrar itens para selecao manual',
+      choices: [
+        { name: 'Todos', value: 'all' },
+        { name: 'Somente sem vinculo', value: 'unlinked' },
+        { name: 'Somente vinculados', value: 'linked' }
+      ],
+      default: 'unlinked'
     },
     {
-      name: 'limit',
-      message: 'Quantos itens revisar agora?',
-      default: 30,
-      validate: (v) => {
-        const n = Number(v);
-        return Number.isFinite(n) && n >= 1 && n <= 300 ? true : 'Digite um numero entre 1 e 300';
-      }
+      name: 'query',
+      message: 'Filtro por titulo (opcional)',
+      default: ''
     }
   ]);
 
-  const queue = (opts.onlyUnlinked ? rows.filter(r => !r.linked) : rows).slice(0, Number(opts.limit));
-  if (!queue.length) {
-    console.log('Nenhum item para revisar.');
+  const q = String(filterAns.query || '').trim().toLowerCase();
+  const filteredRows = rows
+    .filter(r => {
+      if (filterAns.scope === 'unlinked' && r.linked) return false;
+      if (filterAns.scope === 'linked' && !r.linked) return false;
+      if (!q) return true;
+      const title = String(r.item && r.item.title || '').toLowerCase();
+      const alt = Array.isArray(r.item && r.item.altTitles) ? r.item.altTitles.join(' ').toLowerCase() : '';
+      return title.includes(q) || alt.includes(q);
+    })
+    .slice(0, 500);
+
+  if (!filteredRows.length) {
+    console.log('Nenhum item encontrado com esse filtro.');
     return;
   }
-
-  for (const row of queue) {
-    const item = row.item;
-    const preview = await getAutoLinkCandidates(item, { useCache: true, maxSourcesToTry: 15, verifyChapters: true });
-    const best = (preview.best && preview.best.sourceId && Number.isFinite(Number(preview.best.mangaId)))
-      ? preview.best
-      : null;
-
-    console.log('\n[REVIEW] AniList:', item.title);
-    if (Array.isArray(item.altTitles) && item.altTitles.length) {
-      console.log('[REVIEW] Titulos alternativos:', item.altTitles.slice(0, 6).join(' | '));
-    }
-
-    if (best) {
-      console.log(`[REVIEW] Sugestao: ${best.sourceName} -> ${best.mangaTitle} (id=${best.mangaId}, score=${scoreLabel(best.score)}${best.matchedAgainst ? `, match='${best.matchedAgainst}'` : ''}${preview.cached ? ', cache' : ''})`);
-    } else {
-      console.log('[REVIEW] Sem sugestao automatica para este item.');
-    }
-
-    const step = await prompt([
-      {
-        type: 'list',
-        name: 'act',
-        message: 'Acao deste item',
-        choices: [
-          'Aceitar sugestao',
-          'Ver top 5 por fonte',
-          'Pular item',
-          'Parar revisao'
-        ]
-      }
-    ]);
-
-    if (step.act === 'Parar revisao') break;
-    if (step.act === 'Pular item') continue;
-
-    if (step.act === 'Aceitar sugestao') {
-      if (!best) {
-        console.log('Sem sugestao para aceitar.');
-        continue;
-      }
-
-      const saved = setManualLink(item, {
-        sourceId: best.sourceId,
-        sourceName: best.sourceName,
-        mangaId: best.mangaId,
-        mangaTitle: best.mangaTitle
-      });
-      row.linked = saved;
-      console.log(`Vinculo salvo: ${item.title} => ${saved.sourceName || saved.sourceId} / ${saved.mangaTitle}`);
-      continue;
-    }
-
-    if (!Array.isArray(preview.sources) || !preview.sources.length) {
-      console.log('Sem candidatos para mostrar.');
-      continue;
-    }
-
-    const flatChoices = [];
-    preview.sources.forEach(src => {
-      console.log(`- ${src.sourceName} [${src.lang}]`);
-      src.mangas.forEach(m => {
-        console.log(`  ${m.title} (${m.id}) score=${scoreLabel(m.score)} ${chapterLabel(m.hasChapters)}`);
-        flatChoices.push({
-          name: `${src.sourceName} [${src.lang}] -> ${m.title} (${m.id}) score=${m.score} ${m.hasChapters === false ? '[sem capitulos]' : ''}`,
-          value: JSON.stringify({
-            sourceId: src.sourceId,
-            sourceName: src.sourceName,
-            mangaId: m.id,
-            mangaTitle: m.title
-          })
-        });
-      });
-    });
-
-    const pick = await prompt([
-      {
-        type: 'list',
-        name: 'chosen',
-        message: 'Escolha o candidato correto para vincular',
-        pageSize: 20,
-        choices: [
-          ...flatChoices,
-          { name: 'Voltar sem salvar', value: '__skip__' }
-        ]
-      }
-    ]);
-
-    if (pick.chosen === '__skip__') continue;
-    const parsed = JSON.parse(pick.chosen);
-    const saved = setManualLink(item, parsed);
-    row.linked = saved;
-    console.log(`Vinculo salvo: ${item.title} => ${saved.sourceName || saved.sourceId} / ${saved.mangaTitle}`);
-  }
-}
-
-async function createOrUpdateLink(rows, prompt) {
-  await showUnifiedList(rows, prompt);
 
   const pickItem = await prompt([
     {
@@ -619,8 +542,8 @@ async function createOrUpdateLink(rows, prompt) {
       name: 'key',
       message: 'Escolha o manga da sua lista',
       pageSize: 20,
-      choices: rows.slice(0, 300).map(r => ({
-        name: `${linkedStateLabel(r.linked)} ${r.item.title} [${r.item.source}]${r.linked ? ` -> ${r.linked.sourceName || r.linked.sourceId}` : ''}`,
+      choices: filteredRows.map(r => ({
+        name: `${linkedStateLabel(r.linked)} ${truncateText(r.item.title, 60)}${r.linked ? ` -> ${truncateText(r.linked.sourceName || r.linked.sourceId, 24)}` : ''}`,
         value: r.key
       }))
     }
@@ -756,7 +679,7 @@ async function manageManualLinksUI() {
           message: 'Vinculos AniList <-> fontes',
           choices: [
             'Atualizar lista do AniList',
-            'Ver lista completa (cache local)',
+            'Ver lista completa (local)',
             'Varrer lista automaticamente (rapido + cache)',
             'Testar fontes (detectar erro 500)',
             'Criar ou ajustar vinculo manual (inclui remover)',
@@ -771,7 +694,7 @@ async function manageManualLinksUI() {
         continue;
       }
 
-      if (action.act === 'Ver lista completa (cache local)') {
+      if (action.act === 'Ver lista completa (local)') {
         rows = listMangaItemsForManualLink(2000);
         if (!rows.length) {
           console.log('Nenhum item elegivel encontrado. Atualize a lista do AniList.');

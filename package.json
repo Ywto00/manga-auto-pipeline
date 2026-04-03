@@ -2,7 +2,7 @@
   "name": "anilist-mal-sync",
   "version": "0.1.0",
   "description": "",
-  "main": "index.js",
+  "main": "src/cli.js",
   "bin": "src/cli.js",
   "scripts": {
     "start": "node src/cli.js",
@@ -27,8 +27,9 @@
   "homepage": "https://github.com/Ywtoo/anilist-mal-sync#readme",
   "dependencies": {
     "axios": "^1.13.6",
+    "cli-progress": "^3.12.0",
     "inquirer": "^9.2.7",
-    "minimist": "^1.2.8",
+    "ora": "^9.3.0",
     "ws": "^8.20.0"
   },
   "devDependencies": {

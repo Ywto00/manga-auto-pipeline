@@ -1,0 +1,32 @@
+{
+  "menu": {
+    "settings": {
+      "title": "Settings",
+      "general": "General settings",
+      "search": "Search settings",
+      "extensions": "Manage extensions",
+      "links": "Manage AniList <-> sources links",
+      "back": "Back"
+    },
+    "main": {
+      "title": "Main menu",
+      "choice_settings": "Settings",
+      "choice_start_pipeline": "Start Suwayomi and downloads",
+      "choice_start_komga": "Start Komga",
+      "choice_organize_komga": "Organize Komga library (manual)",
+      "choice_cleanup_anilist": "Cleanup read chapters (AniList)",
+      "choice_cancel_downloads": "Cancel Suwayomi downloads",
+      "choice_exit": "Exit (Stop all apps)"
+    }
+  },
+  "firstRun": {
+    "missingConfig": "First run without complete configuration. Opening General Settings..."
+  },
+  "extensions": {
+    "requireSuwayomi": "Managing extensions requires Suwayomi to be running. Start Suwayomi and try again."
+  },
+  "downloads": {
+    "stopped": "Suwayomi downloads stopped.",
+    "stopFailed": "Failed to stop Suwayomi downloads: {{error}}"
+  }
+}
