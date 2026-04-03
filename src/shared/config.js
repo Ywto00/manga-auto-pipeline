@@ -1,7 +1,7 @@
 // Central config helper: provide a single import point for app config.
 // This delegates to the existing `loadConfig` implementation in `cli-logic`.
 
-const { loadConfig: _loadConfig } = require('../..//cli-logic');
+const { loadConfig: _loadConfig } = require('../cli-logic');
 
 let _cached = null;
 

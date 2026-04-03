@@ -1,6 +1,6 @@
-const { bootstrap } = require('./composition/bootstrap');
+const { bootstrapCli } = require('./composition/bootstrap-cli');
 
-const ctx = bootstrap();
+const ctx = bootstrapCli();
 
 if (require.main === module) {
   ctx.mainMenu().catch(e => {

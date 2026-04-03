@@ -14,7 +14,7 @@ const {
   enqueueFromList,
   getSources
 } = require('../../cli-logic');
-const { ensurePrompt } = require('../../interfaces/ui-cli/prompt');
+const { ensurePrompt } = require('../../interfaces/ui-cli/input/prompt');
 const { resolveEnqueuePrefs } = require('./enqueue-prefs');
 
 function ansi(text, code) {

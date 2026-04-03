@@ -19,9 +19,9 @@ const {
   syncKomgaSeriesMetadataFromLocal,
   waitForDownloadsAndSyncKomga
 } = require('../../cli-logic');
-const { ensurePrompt } = require('../../interfaces/ui-cli/prompt');
-const { getLocalIPv4Candidates } = require('../../interfaces/ui-cli/network');
-const { chooseJarPath } = require('../../interfaces/ui-cli/explorer-picker');
+const { ensurePrompt } = require('../../interfaces/ui-cli/input/prompt');
+const { getLocalIPv4Candidates } = require('../../interfaces/ui-cli/system/network');
+const { chooseJarPath } = require('../../interfaces/ui-cli/input/explorer-picker');
 const { resolveEnqueuePrefs } = require('./enqueue-prefs');
 
 function sleep(ms) {
