@@ -1,7 +1,3 @@
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-
 const {
   loadConfig,
   applyConfigValues,
@@ -18,73 +14,19 @@ const {
   triggerKomgaMetadataRefresh,
   syncKomgaSeriesMetadataFromLocal,
   waitForDownloadsAndSyncKomga
-} = require('../../cli-logic');
-const { ensurePrompt } = require('../../interfaces/ui-cli/input/prompt');
-const { getLocalIPv4Candidates } = require('../../interfaces/ui-cli/system/network');
-const { chooseJarPath } = require('../../interfaces/ui-cli/input/explorer-picker');
-const { resolveEnqueuePrefs } = require('./enqueue-prefs');
+} = require('../../../cli-logic');
+const { ensurePrompt } = require('../input/prompt');
+const { getLocalIPv4Candidates } = require('../system/network');
+const { chooseJarPath } = require('../input/explorer-picker');
+const { resolveEnqueuePrefs } = require('../../../features/pipeline/application/resolve-enqueue-prefs');
+const { describeError } = require('../../../features/pipeline/infra/error-utils');
+const { startBackgroundEnqueueWorker } = require('../../../features/pipeline/infra/background-enqueue-worker');
+const { ensureJarReady } = require('../../../features/pipeline/application/jar-management');
+const { runEnqueueBackgroundTask } = require('../../../features/pipeline/application/enqueue-background-task');
+const { runKomgaPostStartTasks, runKomgaPostStartWhenReady } = require('../../../features/pipeline/application/komga-post-start');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function findJarInBin(dataDir, matcher) {
-  const binDir = path.join(dataDir || '', 'bin');
-  if (!binDir || !fs.existsSync(binDir)) return '';
-  try {
-    const entries = fs.readdirSync(binDir, { withFileTypes: true });
-    const jars = entries
-      .filter(e => e.isFile() && /\.jar$/i.test(e.name))
-      .map(e => e.name)
-      .filter(name => matcher.test(name))
-      .sort();
-    if (!jars.length) return '';
-    return path.join(binDir, jars[0]);
-  } catch (e) {
-    return '';
-  }
-}
-
-async function ensureKomgaJarReady(prompt, cfg) {
-  const downloadsDir = path.join(os.homedir(), 'Downloads');
-  let komgaJar = cfg.komgaJarPath || '';
-
-  if (!komgaJar || !fs.existsSync(komgaJar)) {
-    komgaJar = findJarInBin(cfg.dataDir, /komga/i);
-  }
-
-  if (!komgaJar) {
-    komgaJar = await chooseJarPath(prompt, 'Komga', /komga/i, cfg.komgaJarPath || '', downloadsDir);
-  }
-
-  if (!komgaJar) {
-    throw new Error('Komga JAR not provided. Please configure a valid path.');
-  }
-
-  const managedJarDir = path.join(cfg.dataDir, 'bin');
-  const moved = moveJarToManagedFolder(komgaJar, managedJarDir, true);
-  return applyConfigValues({ komgaJarPath: moved });
-}
-
-async function ensureSuwayomiJarReady(prompt, cfg) {
-  const downloadsDir = path.join(os.homedir(), 'Downloads');
-  let suwayomiJar = cfg.jarPath || '';
-
-  if (!suwayomiJar || !fs.existsSync(suwayomiJar)) {
-    suwayomiJar = findJarInBin(cfg.dataDir, /suwayomi/i);
-  }
-
-  if (!suwayomiJar) {
-    suwayomiJar = await chooseJarPath(prompt, 'Suwayomi', /suwayomi/i, cfg.jarPath || '', downloadsDir);
-  }
-
-  if (!suwayomiJar) {
-    throw new Error('Suwayomi JAR not provided. Please configure a valid path.');
-  }
-
-  const managedJarDir = path.join(cfg.dataDir, 'bin');
-  const moved = moveJarToManagedFolder(suwayomiJar, managedJarDir, true);
-  return applyConfigValues({ jarPath: moved });
 }
 
 async function startPipelineUI() {
@@ -99,7 +41,14 @@ async function startPipelineUI() {
     cfg = applyConfigValues({ usernameAnilist: ans.user });
   }
 
-  cfg = await ensureSuwayomiJarReady(prompt, cfg);
+  cfg = await ensureJarReady({
+    cfg,
+    kind: 'suwayomi',
+    prompt,
+    chooseJarPath,
+    moveJarToManagedFolder,
+    applyConfigValues
+  });
 
   try {
     const suwayomi = await startServer();
@@ -127,69 +76,35 @@ async function startPipelineUI() {
       console.log('[START] Nao foi possivel detectar IP automaticamente. Use ipconfig no Windows.');
     }
   } catch (e) {
-    console.error('[START] Falha ao iniciar Suwayomi:', e.message);
+    console.error('[START] Falha ao iniciar Suwayomi:', describeError(e));
     return;
   }
 
   const currentCfg = loadConfig();
-  const username = currentCfg.usernameAnilist;
-
-  console.log(`[LIST] Buscando lista AniList de ${username}...`);
-  try {
-    const { mapped, readingLike } = await fetchUserList('anilist', username);
-    console.log(`[LIST] Total=${mapped.length}, em leitura/pausado=${readingLike.length}`);
-  } catch (e) {
-    console.error('[LIST] Falha ao buscar AniList:', e.message);
-    return;
-  }
-
-  const prefs = resolveEnqueuePrefs(currentCfg);
-  console.log('[ENQUEUE] Iniciando enqueue com base no progresso do AniList...');
-  try {
-    const { output, stats, notFound } = await enqueueFromList({
-      dry: false,
-      priority: prefs.priority,
-      allowedLangs: prefs.allowedLangs,
-      sourceOrderIds: prefs.sourceOrderIds,
-      limit: 200,
-      onItem: (row) => {
-        if (row.skipped) {
-          const why = row.reason || 'already-processed';
-          console.log(`[SKIP] ${row.item.title} (${why})`);
-          return;
+  const workerStart = startBackgroundEnqueueWorker();
+  if (workerStart.ok) {
+    console.log(`[ENQUEUE] Worker em background iniciado (pid=${workerStart.pid}).`);
+    console.log('[ENQUEUE] Abrindo processamento em outro console.');
+  } else {
+    console.log(`[ENQUEUE] Nao foi possivel abrir outro console (${workerStart.reason}). Usando background local.`);
+    setTimeout(() => {
+      runEnqueueBackgroundTask(currentCfg, {
+        fetchUserList,
+        enqueueFromList,
+        resolveEnqueuePrefs,
+        logger: console
+      }).catch((e) => {
+        console.error('[ENQUEUE] Falha:', describeError(e));
+        if (e && e.report) {
+          console.error(`[ENQUEUE] Diagnostico: tentativas=${Number(e.report.attemptsTotal || 0)}, trocasFonte=${Number(e.report.sourceSwitches || 0)}`);
+          if (Array.isArray(e.report.warnings) && e.report.warnings.length) {
+            e.report.warnings.slice(0, 5).forEach((w, i) => {
+              console.error(`  [WARN ${i + 1}] ${w}`);
+            });
+          }
         }
-
-        if (row.ok) {
-          const r = row.result;
-          console.log(`[RUN] ${row.item.title} => ${r.source.name} / ${r.manga.title} / indexes=${r.queuedChapterIndexes.join(',')}`);
-        } else {
-          console.log(`[FAIL] ${row.item.title}: ${row.error}`);
-        }
-      }
-    });
-
-    const ok = output.filter(x => x.ok).length;
-    const failed = output.filter(x => x.ok === false).length;
-    console.log(`[ENQUEUE] Summary: success=${ok}, failed=${failed}`);
-    if (stats) {
-      console.log(`[ENQUEUE] Stats: eligible=${stats.eligibleCount}, alreadyProcessed=${stats.skippedAlreadyProcessed}, processingNow=${stats.processedCount}`);
-    }
-
-    if (Array.isArray(notFound) && notFound.length) {
-      console.log('[ENQUEUE] Nao encontrados com sugestoes:');
-      notFound.slice(0, 20).forEach((nf, i) => {
-        console.log(`${i + 1}. ${nf.title}`);
-        const suggestions = nf.details && Array.isArray(nf.details.suggestionsBySource)
-          ? nf.details.suggestionsBySource
-          : [];
-        suggestions.forEach(s => {
-          const titles = (s.titles || []).slice(0, 5).join(' | ');
-          console.log(`   ${s.sourceName} [${s.lang}] -> ${titles}`);
-        });
       });
-    }
-  } catch (e) {
-    console.error('[ENQUEUE] Falha:', e.message);
+    }, 300);
   }
 
   console.log(`[CONFIG] AniList user: ${currentCfg.usernameAnilist || '(nao definido)'}`);
@@ -437,61 +352,18 @@ async function organizeKomgaLibraryUI() {
   }
 }
 
-async function runKomgaPostStartTasks(cfg) {
-  try {
-    const lib = await ensureKomgaLibraryExists({
-      name: cfg.komgaAutoLibraryName || 'mangas-Suwayomi'
-    });
-    console.log(`[KOMGA] Biblioteca ${lib.name} ${lib.created ? 'criada' : 'ja existente'} em ${lib.root}`);
-  } catch (e) {
-    console.log(`[KOMGA] Nao foi possivel garantir biblioteca padrao: ${e.message}`);
-  }
-
-  if (cfg.komgaSyncOnStart === false) return;
-
-  try {
-    const sync = await triggerKomgaLibraryScan();
-    console.log(`[KOMGA] Sync disparado com sucesso (modo=${sync.strategy}, jobs=${sync.triggered}).`);
-  } catch (e) {
-    console.log(`[KOMGA] Nao foi possivel disparar sync automatico: ${e.message}`);
-  }
-
-  try {
-    const refresh = await triggerKomgaMetadataRefresh();
-    console.log(`[KOMGA] Refresh de metadata disparado (modo=${refresh.strategy}, jobs=${refresh.triggered}).`);
-  } catch (e) {
-    console.log(`[KOMGA] Nao foi possivel disparar refresh de metadata: ${e.message}`);
-  }
-
-  try {
-    const patched = await syncKomgaSeriesMetadataFromLocal();
-    console.log(`[KOMGA] Metadata aplicada direto via API: tentadas=${patched.attempted}, atualizadas=${patched.patched}, sem-match=${patched.skipped}, falhas=${patched.failed}.`);
-  } catch (e) {
-    console.log(`[KOMGA] Nao foi possivel aplicar metadata direta: ${e.message}`);
-  }
-}
-
-async function runKomgaPostStartWhenReady(cfg, tries = 24, intervalMs = 2500) {
-  for (let i = 0; i < tries; i += 1) {
-    try {
-      await ensureKomgaLibraryExists({
-        name: cfg.komgaAutoLibraryName || 'mangas-Suwayomi'
-      });
-      // Once library endpoint is available, run full post-start flow.
-      await runKomgaPostStartTasks(cfg);
-      return;
-    } catch (e) {
-      await sleep(intervalMs);
-    }
-  }
-  console.log('[KOMGA] Komga demorou para ficar pronto; biblioteca/sync automaticos nao foram executados agora.');
-}
-
 async function startKomgaUI() {
   try {
     const prompt = ensurePrompt();
     let cfg = loadConfig();
-    cfg = await ensureKomgaJarReady(prompt, cfg);
+    cfg = await ensureJarReady({
+      cfg,
+      kind: 'komga',
+      prompt,
+      chooseJarPath,
+      moveJarToManagedFolder,
+      applyConfigValues
+    });
     const needsFirstKomgaLogin = !cfg.komgaUsername || !cfg.komgaPassword;
 
     const organizeResult = await organizeDownloadsForKomga({
@@ -551,10 +423,24 @@ async function startKomgaUI() {
     }
 
     if (result.ready) {
-      await runKomgaPostStartTasks(cfg);
+      await runKomgaPostStartTasks(cfg, {
+        ensureKomgaLibraryExists,
+        triggerKomgaLibraryScan,
+        triggerKomgaMetadataRefresh,
+        syncKomgaSeriesMetadataFromLocal,
+        logger: console
+      });
     } else {
       console.log('[KOMGA] Iniciado em background; aguardando ficar pronto para garantir biblioteca e sync...');
-      runKomgaPostStartWhenReady(cfg).catch((e) => {
+      runKomgaPostStartWhenReady(cfg, {
+        ensureKomgaLibraryExists,
+        triggerKomgaLibraryScan,
+        triggerKomgaMetadataRefresh,
+        syncKomgaSeriesMetadataFromLocal,
+        logger: console,
+        tries: 24,
+        intervalMs: 2500
+      }).catch((e) => {
         console.log(`[KOMGA] Pos-start automatico falhou: ${e.message}`);
       });
     }

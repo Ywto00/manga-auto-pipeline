@@ -1,21 +1,17 @@
-// Central config helper: provide a single import point for app config.
-// This delegates to the existing `loadConfig` implementation in `cli-logic`.
-
-const { loadConfig: _loadConfig } = require('../cli-logic');
-
-let _cached = null;
-
-function loadConfig() {
-  _cached = _loadConfig && _loadConfig();
-  return _cached;
-}
+/**
+ * Central config helper: delegate to the feature module config-store.
+ * This keeps old require calls (e.g. from bootstrap-cli.js) working.
+ */
+const { loadConfig, saveConfig, isConfigComplete, syncServerConf } = require('../features/config/infra/config-store');
 
 function getConfig() {
-  if (!_cached) loadConfig();
-  return _cached;
+  return loadConfig();
 }
 
 module.exports = {
   loadConfig,
-  getConfig
+  saveConfig,
+  getConfig,
+  isConfigComplete,
+  syncServerConf
 };

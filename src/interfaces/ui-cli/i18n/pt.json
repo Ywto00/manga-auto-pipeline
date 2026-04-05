@@ -28,5 +28,90 @@
   "downloads": {
     "stopped": "Downloads do Suwayomi parados.",
     "stopFailed": "Falha ao parar downloads do Suwayomi: {{error}}"
+  },
+  "settingsFlow": {
+    "common": {
+      "yes": "sim",
+      "no": "nao",
+      "empty": "(vazio)",
+      "disabled": "(desativada)",
+      "all": "(todos)",
+      "saveBack": "Salvar e voltar",
+      "backNoSave": "Voltar sem salvar"
+    },
+    "general": {
+      "title": "Config geral (edite o que quiser)",
+      "choice": {
+        "dataDir": "Pasta base: {{value}}",
+        "komgaUseDownloadsAsLibrary": "Usar pasta do Suwayomi para o Komga: {{value}}",
+        "komgaSyncOnStart": "Auto sync Komga: {{value}}",
+        "suwayomiWebUIEnabled": "WebUI Suwayomi: {{value}}",
+        "usernameAnilist": "Usuario AniList: {{value}}",
+        "capsAhead": "Capitulos a frente: {{value}}"
+      },
+      "dataDirPickerMessage": "Escolha a pasta base do aplicativo",
+      "usernamePrompt": "Usuario AniList padrao",
+      "capsAheadPrompt": "Quantos capitulos a frente baixar por manga",
+      "capsAheadValidation": "Digite um numero >= 1",
+      "saveFailedPrefix": "Configuracao nao salva:",
+      "saveCompleted": "Configuracao concluida.",
+      "summary": {
+        "jarPath": "Suwayomi JAR:",
+        "komgaJarPath": "Komga JAR:",
+        "dataDir": "Data:",
+        "downloadsPath": "Downloads:",
+        "komgaUseDownloadsAsLibrary": "Usar pasta do Suwayomi para o Komga:",
+        "komgaSyncOnStart": "Auto sync Komga:",
+        "suwayomiWebUIEnabled": "WebUI Suwayomi:"
+      }
+    },
+    "search": {
+      "title": "Config de pesquisa (edite o que quiser)",
+      "choice": {
+        "maxSourcesToTryForSearch": "Max fontes por pesquisa: {{value}}",
+        "maxExtensionsForAutoLink": "Max extensoes no auto-link: {{value}}",
+        "linkCacheTtlMinutes": "TTL cache (min): {{value}}",
+        "apiTimeoutMs": "Timeout API (ms): {{value}}",
+        "enqueueRetryAttempts": "Retries no enqueue: {{value}}",
+        "persistSwitchedSourceLink": "Persistir troca de fonte: {{value}}",
+        "fixedSourceId": "Fonte fixa: {{value}}",
+        "strictTitleMatch": "Match rigido: {{value}}",
+        "strictMinScore": "Score minimo: {{value}}",
+        "preferredSearchLangs": "Idiomas preferidos: {{value}}"
+      },
+      "sourceUnavailableLog": "[SEARCH] Nao foi possivel listar fontes no servidor agora. Ajustando configuracoes basicas mesmo assim.",
+      "sourceOffChoiceLabel": "Desativar fonte fixa (usar auto)",
+      "sourceChoiceLabel": "{{name}} [{{lang}}] ({{id}})",
+      "saveCompleted": "[SEARCH] Configuracao salva.",
+      "summary": {
+        "maxSourcesToTryForSearch": "[SEARCH] Max fontes: {{value}}",
+        "maxExtensionsForAutoLink": "[SEARCH] Max extensoes no auto-link: {{value}}",
+        "linkCacheTtlMinutes": "[SEARCH] TTL cache: {{value}} min",
+        "apiTimeoutMs": "[SEARCH] Timeout API: {{value}} ms",
+        "enqueueRetryAttempts": "[SEARCH] Retries enqueue: {{value}}",
+        "persistSwitchedSourceLink": "[SEARCH] Persistir troca de fonte: {{value}}",
+        "fixedSourceId": "[SEARCH] Fonte fixa: {{value}}",
+        "strictTitleMatch": "[SEARCH] Match rigido: {{enabled}} (minScore={{score}})",
+        "preferredSearchLangs": "[SEARCH] Idiomas preferidos: {{value}}"
+      },
+      "maxSourcesPrompt": "Maximo de fontes por pesquisa automatica (1-50)",
+      "oneToFiftyValidation": "Digite um numero entre 1 e 50",
+      "maxExtensionsPrompt": "Max de extensoes/fontes no auto-link (1-50)",
+      "cacheTtlPrompt": "TTL do cache de sugestoes (minutos, minimo 10)",
+      "minTenValidation": "Digite um numero >= 10",
+      "apiTimeoutPrompt": "Timeout das chamadas da API (ms, minimo 5000)",
+      "minFiveThousandValidation": "Digite um numero >= 5000",
+      "retryPrompt": "Tentativas de retry no enqueue (1-5)",
+      "oneToFiveValidation": "Digite um numero entre 1 e 5",
+      "fixedSourceListPrompt": "Fonte fixa para pesquisa (mais rapido)",
+      "fixedSourceTextPrompt": "Fonte fixa (sourceId) - opcional, deixe vazio para auto",
+      "strictMinScorePrompt": "Score minimo do match de titulo (60-99)",
+      "sixtyToNinetyNineValidation": "Digite um numero entre 60 e 99",
+      "langsCheckboxPrompt": "Idiomas preferidos para pesquisar (max 5; vazio = todos)",
+      "langsCheckboxValidation": "Selecione no maximo 5 idiomas",
+      "langsTextOverridePrompt": "Idiomas por texto (ex: pt-br,en). Se preencher, sobrescreve checkbox",
+      "langsTextPromptNoChoices": "Idiomas por texto (ex: pt-br,en). Vazio = todos",
+      "fatalErrorPrefix": "Falha em Search settings:"
+    }
   }
 }

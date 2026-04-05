@@ -7,8 +7,8 @@ const {
   fetchRepoIndexes,
   getServerExtensions,
   installPackages
-} = require('../../cli-logic');
-const { ensurePrompt } = require('../../interfaces/ui-cli/input/prompt');
+} = require('../../../cli-logic');
+const { ensurePrompt } = require('../input/prompt');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));

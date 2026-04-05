@@ -8,14 +8,14 @@ const presenter = require('../interfaces/ui-cli/adapters/presenter');
 const { t, setLocale } = require('../interfaces/ui-cli/i18n');
 const { ensurePrompt } = require('../interfaces/ui-cli/input/prompt');
 const { pickFolderWithExplorer, chooseJarPath } = require('../interfaces/ui-cli/input/explorer-picker');
-const { manageExtensionsUI } = require('../UI/menus/extensions-menu');
-const { manageManualLinksUI } = require('../UI/menus/links-menu');
+const { manageExtensionsUI } = require('../interfaces/ui-cli/menus/extensions-menu');
+const { manageManualLinksUI } = require('../interfaces/ui-cli/menus/links-menu');
 const {
   startPipelineUI,
   cleanupReadByAniListUI,
   organizeKomgaLibraryUI,
   startKomgaUI
-} = require('../UI/menus/pipeline-menu');
+} = require('../interfaces/ui-cli/menus/pipeline-menu');
 const { loadConfig } = require('../shared/config');
 
 function bootstrapCli() {
@@ -52,7 +52,7 @@ function bootstrapCli() {
     t,
     ensurePrompt,
     settingsMenu,
-    configureUI: settingsGeneralMenu,
+    openGeneralSettings: settingsGeneralMenu,
     startPipelineUI,
     cleanupReadByAniListUI,
     organizeKomgaLibraryUI,

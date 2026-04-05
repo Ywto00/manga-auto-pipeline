@@ -6,7 +6,8 @@ const {
   getSources,
   isConfigComplete,
   stopDownloads,
-  stopServer
+  stopServer,
+  stopKomga
 } = require('../../../cli-logic');
 
 module.exports = {
@@ -17,5 +18,6 @@ module.exports = {
   getSources,
   isConfigComplete,
   stopDownloads,
-  stopServer
+  stopServer,
+  stopKomga
 };

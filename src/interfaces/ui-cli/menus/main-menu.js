@@ -4,7 +4,7 @@ module.exports = function createMainMenu(deps) {
     t,
     ensurePrompt,
     settingsMenu,
-    configureUI,
+    openGeneralSettings,
     startPipelineUI,
     cleanupReadByAniListUI,
     organizeKomgaLibraryUI,
@@ -66,7 +66,7 @@ module.exports = function createMainMenu(deps) {
     const cfg = presenter.loadConfig();
     if (!presenter.isConfigComplete(cfg)) {
       console.log(t('firstRun.missingConfig'));
-      await configureUI();
+      await openGeneralSettings();
     }
 
     while (true) {

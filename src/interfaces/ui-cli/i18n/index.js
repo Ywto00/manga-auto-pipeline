@@ -46,7 +46,15 @@ function setLocale(loc) {
   ensureLocale(loc);
 }
 
+function createScopedT(baseKey, translate = t) {
+  return function scopedT(key, vars) {
+    const fullKey = key ? `${baseKey}.${key}` : baseKey;
+    return translate(fullKey, vars);
+  };
+}
+
 module.exports = {
   t,
-  setLocale
+  setLocale,
+  createScopedT
 };

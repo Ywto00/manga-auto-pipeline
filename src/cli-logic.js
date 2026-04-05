@@ -8,157 +8,61 @@ const { fetchAniList, fetchAniListMediaById } = require('./shared/adapters/anili
 const { fetchMAL } = require('./shared/adapters/mal.adapter');
 const { normalize } = require('./shared/utils/normalize');
 const { postGraphQL } = require('./shared/utils/api-common');
+const { loadSuwayomiLibraryIndex } = require('./features/links/infra/load-suwayomi-library-index');
+const { resolveItemLibraryLink } = require('./features/links/application/resolve-item-library-link');
+const { linkItemInLibrary } = require('./features/links/application/link-item-in-library');
+const { unlinkItemFromLibrary } = require('./features/links/application/unlink-item-from-library');
+// Suwayomi server & API (feature modules)
+const { startSuwayomiJar, waitForSuwayomiReady: waitForReady } = require('./features/server/infra/suwayomi-runner');
+const { startKomga: _komgaStartNew, startKomgaJar, waitForKomgaReady, getEffectiveKomgaJavaArgs, moveJarToManaged: _moveJarKomga } = require('./features/komga/infra/komga-runner');
 const {
-  startSuwayomiJar,
-  startKomgaJar,
-  waitForReady,
   makeApiClient,
-  searchAndEnqueue,
-  quotePathForHocon,
   listExtensions,
   installExtension,
   listSources,
   searchSource,
+  addMangaToLibrary,
   removeMangaFromLibrary,
   getMangaChapters,
-  deleteDownloadedChapter,
+  getMangaInfo,
+  queueChapter,
+  startDownloader,
   stopDownloader,
+  deleteDownloadedChapter,
   getDownloadsState,
   getDownloadsSnapshot,
   waitForDownloadsToFinish
-} = require('./bridge');
+} = require('./features/server/infra/suwayomi-api');
 
-const DEV_DATA_ROOT = path.join(__dirname, '..', 'data');
-const PACKAGED_STATE_ROOT = path.join(
-  process.env.APPDATA || path.join(os.homedir(), '.config'),
-  'manga-auto-pipeline'
-);
-const PACKAGED_BOOTSTRAP_PATH = path.join(PACKAGED_STATE_ROOT, 'runtime.json');
-const DEFAULT_MANAGED_DIR = path.join(os.homedir(), 'MangaPipeline');
-const DATA_DIR_ENV_KEY = 'MANGA_PIPELINE_DATA_DIR';
+// Komga organizer
+const { organizeDownloadsForKomga } = require('./features/komga/infra/komga-organizer');
 
-function readPackagedBootstrap() {
-  try {
-    const txt = fs.readFileSync(PACKAGED_BOOTSTRAP_PATH, 'utf8') || '{}';
-    const parsed = JSON.parse(txt);
-    if (parsed && typeof parsed === 'object') return parsed;
-  } catch (e) {
-    // ignore
-  }
-  return {};
-}
-
-function writePackagedBootstrap(dataDir) {
-  const dir = String(dataDir || '').trim() || DEFAULT_MANAGED_DIR;
-  fs.mkdirSync(path.dirname(PACKAGED_BOOTSTRAP_PATH), { recursive: true });
-  fs.writeFileSync(PACKAGED_BOOTSTRAP_PATH, JSON.stringify({ dataDir: dir }, null, 2), 'utf8');
-}
-
-function hasConfigAt(root) {
-  if (!root) return false;
-  return fs.existsSync(path.join(root, 'config.json'));
-}
-
-function toDataRootFromDir(baseDir) {
-  const raw = String(baseDir || '').trim();
-  if (!raw) return null;
-  return path.join(path.resolve(raw), 'data');
-}
-
-function readDataDirFromConfigFile(configPath) {
-  try {
-    if (!configPath || !fs.existsSync(configPath)) return '';
-    const txt = fs.readFileSync(configPath, 'utf8') || '{}';
-    const parsed = JSON.parse(txt);
-    return String(parsed && parsed.dataDir || '').trim();
-  } catch (e) {
-    return '';
-  }
-}
-
-function resolveDataRoot(explicitDataDir = null) {
-  if (explicitDataDir) {
-    return toDataRootFromDir(explicitDataDir);
-  }
-
-  const bootstrap = readPackagedBootstrap();
-  const envRoot = toDataRootFromDir(process.env[DATA_DIR_ENV_KEY]);
-  const bootstrapRoot = toDataRootFromDir(bootstrap.dataDir);
-  const legacyRepoConfigPath = path.join(DEV_DATA_ROOT, 'config.json');
-  const legacyDeclaredRoot = toDataRootFromDir(readDataDirFromConfigFile(legacyRepoConfigPath));
-  const defaultManagedRoot = toDataRootFromDir(DEFAULT_MANAGED_DIR);
-
-  const preferred = [envRoot, bootstrapRoot, legacyDeclaredRoot, defaultManagedRoot, DEV_DATA_ROOT].filter(Boolean);
-  for (const root of preferred) {
-    if (hasConfigAt(root)) return root;
-  }
-
-  // If no config exists yet, keep repo-data behavior in dev and managed behavior in packaged builds.
-  if (process && process.pkg) return defaultManagedRoot;
-  return DEV_DATA_ROOT;
-}
-
-function getDataPaths(explicitDataDir = null) {
-  const root = resolveDataRoot(explicitDataDir);
-  return {
-    root,
-    config: path.join(root, 'config.json'),
-    list: path.join(root, 'list.json'),
-    downloads: path.join(root, 'downloads.json'),
-    linkCache: path.join(root, 'link-cache.json')
-  };
-}
-
-function getConfigPath() {
-  return getDataPaths().config;
-}
-
-function getListPath() {
-  return getDataPaths().list;
-}
-
-function getDownloadsPath() {
-  return getDataPaths().downloads;
-}
-
-function getLinkCachePath() {
-  return getDataPaths().linkCache;
-}
+// Config & path functions (re-exported for backward compatibility)
+const {
+  DEV_DATA_ROOT,
+  PACKAGED_STATE_ROOT,
+  PACKAGED_BOOTSTRAP_PATH,
+  DEFAULT_MANAGED_DIR,
+  DATA_DIR_ENV_KEY,
+  readPackagedBootstrap,
+  writePackagedBootstrap,
+  hasConfigAt,
+  toDataRootFromDir,
+  readDataDirFromConfigFile,
+  resolveDataRoot,
+  getDataPaths,
+  getConfigPath,
+  getListPath,
+  getDownloadsPath,
+  getLinkCachePath,
+  loadConfig,
+  saveConfig
+} = require('./config/infra/config-store');
 
 const CONFIG_PATH = getConfigPath();
 const LIST_PATH = getListPath();
 const DOWNLOADS_PATH = getDownloadsPath();
 const LINK_CACHE_PATH = getLinkCachePath();
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function loadConfig() {
-  const configPath = getConfigPath();
-  try {
-    const txt = fs.readFileSync(configPath, 'utf8') || '{}';
-    const cfg = JSON.parse(txt);
-    const bootstrap = readPackagedBootstrap();
-    cfg.dataDir = String(cfg.dataDir || bootstrap.dataDir || DEFAULT_MANAGED_DIR).trim() || DEFAULT_MANAGED_DIR;
-    return cfg;
-  } catch (e) {
-    const bootstrap = readPackagedBootstrap();
-    return {
-      dataDir: String(bootstrap.dataDir || DEFAULT_MANAGED_DIR).trim() || DEFAULT_MANAGED_DIR
-    };
-  }
-}
-
-function saveConfig(cfg) {
-  const explicitDataDir = cfg && cfg.dataDir ? String(cfg.dataDir).trim() : null;
-  if (explicitDataDir) {
-    writePackagedBootstrap(explicitDataDir);
-  }
-  const configPath = getDataPaths(explicitDataDir).config;
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), 'utf8');
-}
 
 function upsertHoconLine(hoconText, key, rawValue) {
   const rx = new RegExp(`^\\s*${key.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')}\\s*=.*$`, 'm');
@@ -229,19 +133,9 @@ function isConfigComplete(cfg) {
 
 function moveJarToManagedFolder(sourceJarPath, managedDir, overwrite = true) {
   if (!sourceJarPath) return sourceJarPath;
-  fs.mkdirSync(managedDir, { recursive: true });
-  const targetJarPath = path.join(managedDir, path.basename(sourceJarPath));
-  if (path.resolve(sourceJarPath) === path.resolve(targetJarPath)) return targetJarPath;
-  if (overwrite && fs.existsSync(targetJarPath)) {
-    fs.unlinkSync(targetJarPath);
-  }
-  try {
-    fs.renameSync(sourceJarPath, targetJarPath);
-  } catch (e) {
-    fs.copyFileSync(sourceJarPath, targetJarPath);
-    fs.unlinkSync(sourceJarPath);
-  }
-  return targetJarPath;
+  if (overwrite) fs.mkdirSync(managedDir, { recursive: true });
+  if (path.resolve(sourceJarPath) === path.resolve(path.join(managedDir, path.basename(sourceJarPath)))) return path.join(managedDir, path.basename(sourceJarPath));
+  return _moveJarKomga(sourceJarPath, managedDir);
 }
 
 function applyConfigValues(values) {
@@ -266,7 +160,7 @@ function applyConfigValues(values) {
   cfg.strictMinScore = Math.max(60, Math.min(99, Number(cfg.strictMinScore || 88)));
   cfg.linkCacheTtlMinutes = Math.max(10, Number(cfg.linkCacheTtlMinutes || 720));
   cfg.maxExtensionsForAutoLink = Math.max(1, Math.min(50, Number(cfg.maxExtensionsForAutoLink || 12)));
-  cfg.cleanupLibraryDuplicates = cfg.cleanupLibraryDuplicates !== false;
+  cfg.cleanupLibraryDuplicates = cfg.cleanupLibraryDuplicates === true;
   cfg.persistSwitchedSourceLink = cfg.persistSwitchedSourceLink !== false;
   cfg.komgaUseDownloadsAsLibrary = cfg.komgaUseDownloadsAsLibrary !== false;
   cfg.komgaSyncOnStart = cfg.komgaSyncOnStart !== false;
@@ -864,12 +758,8 @@ function moveFile(src, dest) {
 }
 
 function buildWantedChapterNumbers(progress, capsAhead) {
-  const out = [];
-  const p = Number(progress || 0);
-  const c = Number(capsAhead || 0);
-  const start = p > 0 ? p : 1;
-  for (let i = 0; i < c; i += 1) out.push(start + i);
-  return out;
+  const { buildWantedChapterNumbers: fn } = require('./features/enqueue/domain/enqueue-utils');
+  return fn(progress, capsAhead);
 }
 
 function toLocalYmd(value) {
@@ -933,31 +823,16 @@ async function startServer() {
   return { cfg, ready, pid: runner.proc.pid, apiUrl };
 }
 
-async function waitForKomgaReady(komgaUrl, timeoutMs = 30000, intervalMs = 1000) {
-  const startAt = Date.now();
-  while (Date.now() - startAt < timeoutMs) {
-    try {
-      const res = await axios.get(komgaUrl, {
-        timeout: 3000,
-        validateStatus: () => true
-      });
-      if (res && res.status >= 200 && res.status < 500) return true;
-    } catch (e) {
-      // ignore and retry
-    }
-    await sleep(intervalMs);
-  }
-  return false;
-}
-
-async function startKomga() {
+// Backward-compatible wrapper: legacy startKomga wrapper that uses the new startKomgaJar from komga-runner
+// Old callers in menus/pipelines may still reference this signature via cli-logic
+async function _startKomgaLegacy() {
   const cfg = loadConfig();
   if (!cfg.komgaJarPath) throw new Error('No Komga JAR configured.');
   if (!cfg.dataDir) throw new Error('No data folder configured.');
 
   const managedJarDir = path.join(cfg.dataDir, 'bin');
   try {
-    cfg.komgaJarPath = moveJarToManagedFolder(cfg.komgaJarPath, managedJarDir, true);
+    cfg.komgaJarPath = _moveJarKomga(cfg.komgaJarPath, managedJarDir);
   } catch (e) {
     throw new Error(`Failed to move Komga JAR to managed bin folder: ${e.message}`);
   }
@@ -968,14 +843,11 @@ async function startKomga() {
   saveConfig(cfg);
 
   const runner = startKomgaJar(cfg.komgaJarPath, {
-    javaArgs: cfg.komgaJavaArgs || [],
+    javaArgs: getEffectiveKomgaJavaArgs(cfg),
     appArgs: cfg.komgaAppArgs || [],
     detached: true,
     cwd: cfg.komgaDataDir,
-    env: {
-      ...process.env,
-      KOMGA_CONFIGDIR: cfg.komgaDataDir
-    }
+    env: { ...process.env, KOMGA_CONFIGDIR: cfg.komgaDataDir }
   });
 
   const ready = await waitForKomgaReady(cfg.komgaUrl, 30000, 1000);
@@ -983,6 +855,9 @@ async function startKomga() {
   saveConfig(cfg);
   return { cfg, ready, pid: runner.proc.pid, komgaUrl: cfg.komgaUrl };
 }
+
+// Re-export alias for backward compatibility
+const startKomga = _startKomgaLegacy;
 
 function buildKomgaAuthHeaders(cfg) {
   if (cfg && cfg.komgaApiKey) {
@@ -1501,10 +1376,8 @@ function readListForEnqueue() {
 }
 
 function getItemProcessKey(item) {
-  const src = String(item.source || 'unknown');
-  const id = String(item.id || '');
-  const sk = String(item.searchKey || normalize(item.title || ''));
-  return `${src}:${id}:${sk}`;
+  const { getItemProcessKey: fn } = require('./features/enqueue/domain/enqueue-utils');
+  return fn(item);
 }
 
 function loadDownloadsRegistry() {
@@ -1629,16 +1502,8 @@ function upsertSmartEnqueueReport(item, report) {
 }
 
 function chaptersAreAlreadyCovered(existingRequestedChapters, currentRequestedChapters) {
-  const prev = Array.isArray(existingRequestedChapters)
-    ? existingRequestedChapters.map(Number).filter(Number.isFinite)
-    : [];
-  const curr = Array.isArray(currentRequestedChapters)
-    ? currentRequestedChapters.map(Number).filter(Number.isFinite)
-    : [];
-
-  if (!prev.length || !curr.length) return false;
-  const prevSet = new Set(prev);
-  return curr.every(ch => prevSet.has(ch));
+  const { chaptersAreAlreadyCovered: fn } = require('./features/enqueue/domain/enqueue-utils');
+  return fn(existingRequestedChapters, currentRequestedChapters);
 }
 
 function saveDownloadsRegistry(registry) {
@@ -1741,6 +1606,206 @@ function scoreCandidateAgainstItemTitles(item, candidateTitle) {
   return best;
 }
 
+function buildUniqueSearchTermsForLinkResolution(item, linked, fallbackTerms = []) {
+  const out = [];
+  const push = (v) => {
+    const s = String(v || '').trim();
+    if (!s) return;
+    if (!out.some(x => x.toLowerCase() === s.toLowerCase())) out.push(s);
+  };
+
+  push(linked && linked.mangaTitle);
+  push(item && item.title);
+  (Array.isArray(item && item.altTitles) ? item.altTitles : []).forEach(push);
+  (Array.isArray(fallbackTerms) ? fallbackTerms : []).forEach(push);
+  push(item && item.searchKey);
+
+  return out.slice(0, 10);
+}
+
+async function resolveManualLinkAgainstSource(client, item, linked, options = {}) {
+  if (!linked || linked.sourceId == null) {
+    return { ok: false, reason: 'manual-link-missing' };
+  }
+
+  const strictMinScore = Number(options.strictMinScore || 88);
+  const allowOnlineResolve = options.allowOnlineResolve === true;
+  const sourceId = String(linked.sourceId);
+  const terms = buildUniqueSearchTermsForLinkResolution(item, linked, options.searchTerms || []);
+  if (!terms.length) {
+    return { ok: false, reason: 'no-terms-for-resolution' };
+  }
+
+  const sourceList = Array.isArray(options.sources) && options.sources.length
+    ? options.sources
+    : await listSources(client);
+  const source = Array.isArray(sourceList)
+    ? sourceList.find(s => String(s && s.id) === sourceId)
+    : null;
+
+  if (!source) {
+    return { ok: false, reason: 'source-not-found' };
+  }
+
+  const libraryEntries = Array.isArray(options.libraryEntries) ? options.libraryEntries : [];
+  if (libraryEntries.length) {
+    const sourceLibrary = libraryEntries
+      .filter(m => String(m && m.sourceId || '') === sourceId)
+      .filter(m => m && m.inLibrary !== false)
+      .map(m => ({
+        mangaId: Number(m && m.id),
+        mangaTitle: String(m && m.title || '').trim()
+      }))
+      .filter(m => Number.isFinite(m.mangaId) && m.mangaTitle);
+
+    let bestLibrary = null;
+    for (const m of sourceLibrary) {
+      const scored = scoreCandidateAgainstItemTitles(item, m.mangaTitle);
+      if (!bestLibrary || Number(scored.score || 0) > Number(bestLibrary.score || 0)) {
+        bestLibrary = {
+          sourceId,
+          sourceName: source.name || sourceId,
+          mangaId: m.mangaId,
+          mangaTitle: m.mangaTitle,
+          score: Number(scored.score || 0),
+          matchedAgainst: scored.matchedAgainst || ''
+        };
+      }
+    }
+
+    if (bestLibrary && Number(bestLibrary.score || 0) >= strictMinScore) {
+      return { ok: true, link: bestLibrary };
+    }
+  }
+
+  // Fast path: use what is already in Suwayomi library for this saved mangaId.
+  const linkedMangaId = Number(linked.mangaId);
+  if (Number.isFinite(linkedMangaId)) {
+    try {
+      const info = await client.get(`/api/v1/manga/${linkedMangaId}`);
+      const title = String(info && info.title || linked.mangaTitle || '').trim();
+      const scored = scoreCandidateAgainstItemTitles(item, title);
+      if (Number(scored.score || 0) >= strictMinScore) {
+        return {
+          ok: true,
+          link: {
+            sourceId,
+            sourceName: source.name || sourceId,
+            mangaId: linkedMangaId,
+            mangaTitle: title,
+            score: Number(scored.score || 0),
+            matchedAgainst: scored.matchedAgainst || ''
+          }
+        };
+      }
+
+      return { ok: false, reason: `library-title-mismatch(${scored.score}<${strictMinScore})` };
+    } catch (e) {
+      // If manga is no longer valid in local library, fallback behavior below applies.
+    }
+  }
+
+  if (!allowOnlineResolve) {
+    return { ok: false, reason: 'library-only-mode-no-valid-local-id' };
+  }
+
+  let best = null;
+  for (const term of terms) {
+    let page = null;
+    try {
+      page = await searchSource(client, sourceId, term, 1);
+    } catch (e) {
+      continue;
+    }
+
+    const mangas = Array.isArray(page && page.mangaList) ? page.mangaList : [];
+    for (const manga of mangas) {
+      const mangaId = Number(manga && manga.id);
+      if (!Number.isFinite(mangaId)) continue;
+
+      const title = String((manga && manga.title) || '').trim();
+      if (!title) continue;
+
+      const scored = scoreCandidateAgainstItemTitles(item, title);
+      if (!best || Number(scored.score || 0) > Number(best.score || 0)) {
+        best = {
+          sourceId,
+          sourceName: source.name || sourceId,
+          mangaId,
+          mangaTitle: title,
+          score: Number(scored.score || 0),
+          matchedAgainst: scored.matchedAgainst || ''
+        };
+      }
+    }
+
+    if (best && Number(best.score || 0) >= 98) break;
+  }
+
+  if (!best) {
+    return { ok: false, reason: 'no-candidate-found' };
+  }
+
+  if (Number(best.score || 0) < strictMinScore) {
+    return { ok: false, reason: `low-confidence(${best.score}<${strictMinScore})`, candidate: best };
+  }
+
+  return { ok: true, link: best };
+}
+
+async function getSuwayomiLibraryEntries(client, context = null) {
+  if (context && Array.isArray(context._suwayomiLibraryEntries)) {
+    return context._suwayomiLibraryEntries;
+  }
+
+  try {
+    const rows = await client.get('/api/v1/category/0');
+    const arr = Array.isArray(rows) ? rows : [];
+    if (context) context._suwayomiLibraryEntries = arr;
+    return arr;
+  } catch (e) {
+    if (context) context._suwayomiLibraryEntries = [];
+    return [];
+  }
+}
+
+function findBestLibraryLinkForItem(item, libraryEntries = [], sourceNameById = null, strictMinScore = 88) {
+  return resolveItemLibraryLink({
+    item,
+    libraryEntries,
+    sourceNameById: sourceNameById instanceof Map ? sourceNameById : new Map(),
+    strictMinScore,
+    scoreCandidate: scoreCandidateAgainstItemTitles
+  });
+}
+
+function isFallbackMatchSafe(item, fixed, cfg) {
+  const strictMinScore = Number(cfg && cfg.strictMinScore || 88);
+  const candidateTitle = String(fixed && fixed.mangaTitle || '').trim();
+  if (!candidateTitle) return { ok: false, reason: 'sem-titulo-candidato', overallScore: 0, primaryScore: 0 };
+
+  const primaryInput = String((item && item.title) || (item && item.searchKey) || '').trim();
+  const primaryScore = primaryInput ? scoreTwoTitlesForAutoLink(primaryInput, candidateTitle) : 0;
+  const overall = scoreCandidateAgainstItemTitles(item || {}, candidateTitle);
+  const overallScore = Number(overall && overall.score || fixed && fixed.score || 0);
+
+  const looksDoujinshi = /doujinshi|\bdj\b|fanbook|artbook|anthology/i.test(candidateTitle);
+  if (looksDoujinshi && !/doujinshi|\bdj\b/i.test(primaryInput)) {
+    return { ok: false, reason: 'doujinshi-suspeito', overallScore, primaryScore };
+  }
+
+  if (overallScore < strictMinScore) {
+    return { ok: false, reason: `score-geral-baixo(${overallScore}<${strictMinScore})`, overallScore, primaryScore };
+  }
+
+  // Strong guard against generic alias mismatches: primary title must still match well.
+  if (primaryScore < Math.max(84, strictMinScore - 4)) {
+    return { ok: false, reason: `score-titulo-principal-baixo(${primaryScore})`, overallScore, primaryScore };
+  }
+
+  return { ok: true, reason: '', overallScore, primaryScore, matchedAgainst: overall && overall.matchedAgainst ? overall.matchedAgainst : '' };
+}
+
 function reorderSourcesByIds(sources, orderedIds = []) {
   if (!Array.isArray(orderedIds) || !orderedIds.length) return sources;
   const pos = new Map(orderedIds.map((id, i) => [String(id), i]));
@@ -1775,43 +1840,58 @@ function getManualLinks(cfg = null) {
   return cache.manualLinks;
 }
 
-function setManualLink(item, link) {
-  const key = getItemProcessKey(item);
-  const cache = loadLinkCache();
-  cache.manualLinks = getManualLinks();
-  cache.manualLinks[key] = {
-    sourceId: String(link.sourceId),
-    sourceName: link.sourceName || '',
-    mangaId: Number(link.mangaId),
-    mangaTitle: link.mangaTitle || item.title || '',
-    updatedAt: new Date().toISOString()
-  };
-  saveLinkCache(cache);
-  return cache.manualLinks[key];
+async function setManualLink(item, link) {
+  const cfg = loadConfig();
+  const apiUrl = cfg.apiUrl || 'http://localhost:4567';
+  const timeoutMs = Math.max(5000, Number(cfg.apiTimeoutMs || 30000));
+  const client = makeApiClient(apiUrl, { timeout: timeoutMs });
+  return linkItemInLibrary({
+    client,
+    addMangaToLibrary,
+    link,
+    fallbackTitle: item && item.title ? item.title : ''
+  });
 }
 
-function removeManualLink(item) {
-  const key = getItemProcessKey(item);
-  const cache = loadLinkCache();
-  const links = getManualLinks();
-  if (links[key]) {
-    delete links[key];
-    cache.manualLinks = links;
-    saveLinkCache(cache);
-  }
-  return true;
+async function removeManualLink(item) {
+  const cfg = loadConfig();
+  const apiUrl = cfg.apiUrl || 'http://localhost:4567';
+  const timeoutMs = Math.max(5000, Number(cfg.apiTimeoutMs || 30000));
+  const client = makeApiClient(apiUrl, { timeout: timeoutMs });
+  const index = await loadSuwayomiLibraryIndex({ client, listSources });
+  return unlinkItemFromLibrary({
+    client,
+    removeMangaFromLibrary,
+    item,
+    libraryEntries: index.entries,
+    sourceNameById: index.sourceNameById,
+    strictMinScore: Number(cfg.strictMinScore || 88),
+    scoreCandidate: scoreCandidateAgainstItemTitles
+  });
 }
 
-function listMangaItemsForManualLink(limit = 300) {
+async function listMangaItemsForManualLink(limit = 300) {
   const prepared = readListForEnqueue();
   const cfg = loadConfig();
-  const links = getManualLinks(cfg);
+  const apiUrl = cfg.apiUrl || 'http://localhost:4567';
+  const timeoutMs = Math.max(5000, Number(cfg.apiTimeoutMs || 30000));
+  const client = makeApiClient(apiUrl, { timeout: timeoutMs });
+  const index = await loadSuwayomiLibraryIndex({ client, listSources });
+  const strictMinScore = Number(cfg.strictMinScore || 88);
+
   return prepared.list.slice(0, limit).map(item => {
     const key = getItemProcessKey(item);
+    const linked = resolveItemLibraryLink({
+      item,
+      libraryEntries: index.entries,
+      sourceNameById: index.sourceNameById,
+      strictMinScore,
+      scoreCandidate: scoreCandidateAgainstItemTitles
+    });
     return {
       key,
       item,
-      linked: links[key] || null
+      linked: linked || null
     };
   });
 }
@@ -1833,9 +1913,17 @@ async function searchManualLinkCandidates(item, sourceId, query) {
 
 async function getManualLinkRuntimeStatus(item) {
   const cfg = loadConfig();
-  const key = getItemProcessKey(item);
-  const links = getManualLinks(cfg);
-  const linked = links[key] || null;
+  const apiUrl = cfg.apiUrl || 'http://localhost:4567';
+  const client = makeApiClient(apiUrl, { timeout: Math.max(5000, Number(cfg.apiTimeoutMs || 30000)) });
+  const strictMinScore = Number(cfg.strictMinScore || 88);
+  const index = await loadSuwayomiLibraryIndex({ client, listSources });
+  const linked = resolveItemLibraryLink({
+    item,
+    libraryEntries: index.entries,
+    sourceNameById: index.sourceNameById,
+    strictMinScore,
+    scoreCandidate: scoreCandidateAgainstItemTitles
+  });
 
   if (!linked) {
     return {
@@ -1848,8 +1936,6 @@ async function getManualLinkRuntimeStatus(item) {
     };
   }
 
-  const apiUrl = cfg.apiUrl || 'http://localhost:4567';
-  const client = makeApiClient(apiUrl, { timeout: Math.max(5000, Number(cfg.apiTimeoutMs || 30000)) });
   const mangaId = Number(linked.mangaId);
 
   if (!Number.isFinite(mangaId)) {
@@ -1936,6 +2022,11 @@ async function getAutoLinkCandidates(item, options = {}) {
   let sources = rawSources;
   if (langSet.size > 0) {
     sources = rawSources.filter(s => langSet.has(String(s.lang || '').toLowerCase()));
+  }
+
+  // Keep preview resilient: if language filters remove all sources, fallback to all installed sources.
+  if (!sources.length) {
+    sources = rawSources;
   }
 
   const ordered = reorderSourcesByIds(sources, Array.isArray(options.sourceOrderIds) ? options.sourceOrderIds : []);
@@ -2152,6 +2243,7 @@ async function tryFixedMatchWithRetries(client, item, chapters, priority, base, 
 
 async function runSmartEnqueueFlow(client, item, chapters, priority, context) {
   const retriesPerSource = Math.max(1, Math.min(5, Number(context.cfg.enqueueRetryAttempts || 3)));
+  const allowFallbackOnLinkedFailure = context.cfg.allowFallbackOnLinkedFailure === true;
   const report = {
     attemptsTotal: 0,
     sourceSwitches: 0,
@@ -2170,13 +2262,45 @@ async function runSmartEnqueueFlow(client, item, chapters, priority, context) {
   };
 
   if (linked && linked.sourceId != null && linked.mangaId != null) {
-    const primary = await tryFixedMatchWithRetries(client, item, chapters, priority || [], base, linked, retriesPerSource);
+    const libraryEntries = await getSuwayomiLibraryEntries(client, context);
+    const resolved = await resolveManualLinkAgainstSource(client, item, linked, {
+      sources: base.sources,
+      searchTerms: base.searchTerms,
+      strictMinScore: base.strictMinScore,
+      allowOnlineResolve: context.cfg.allowOnlineResolveForManualLink === true,
+      libraryEntries
+    });
+
+    if (!resolved.ok) {
+      const err = new Error(`Nao foi possivel resolver vinculo manual para "${item.title || item.searchKey}": ${resolved.reason}`);
+      err.code = 'MANUAL_LINK_RESOLVE_FAILED';
+      err.report = report;
+      return { ok: false, error: err, report };
+    }
+
+    const effectiveLinked = {
+      ...linked,
+      sourceId: String(resolved.link.sourceId),
+      sourceName: resolved.link.sourceName || linked.sourceName || String(resolved.link.sourceId),
+      mangaId: Number(resolved.link.mangaId),
+      mangaTitle: resolved.link.mangaTitle || linked.mangaTitle || item.title || ''
+    };
+
+    if (
+      String(effectiveLinked.sourceId) !== String(linked.sourceId)
+      || Number(effectiveLinked.mangaId) !== Number(linked.mangaId)
+      || String(effectiveLinked.mangaTitle || '') !== String(linked.mangaTitle || '')
+    ) {
+      effectiveLinked.updatedAt = new Date().toISOString();
+    }
+
+    const primary = await tryFixedMatchWithRetries(client, item, chapters, priority || [], base, effectiveLinked, retriesPerSource);
     report.attemptsTotal += primary.attempts.length;
     report.sourceAttempts.push({
-      sourceId: String(linked.sourceId),
-      sourceName: linked.sourceName || String(linked.sourceId),
-      mangaId: Number(linked.mangaId),
-      mangaTitle: linked.mangaTitle || item.title || '',
+      sourceId: String(effectiveLinked.sourceId),
+      sourceName: effectiveLinked.sourceName || String(effectiveLinked.sourceId),
+      mangaId: Number(effectiveLinked.mangaId),
+      mangaTitle: effectiveLinked.mangaTitle || item.title || '',
       failedAttempts: primary.attempts.filter(a => !a.ok).length,
       attempts: primary.attempts,
       lastError: primary.error ? String(primary.error.message || primary.error) : ''
@@ -2186,7 +2310,14 @@ async function runSmartEnqueueFlow(client, item, chapters, priority, context) {
       return { ok: true, result: primary.result, report };
     }
 
-    report.warnings.push(`Fonte ${linked.sourceName || linked.sourceId} falhou ${retriesPerSource}x; pode estar com defeito.`);
+    report.warnings.push(`Fonte ${effectiveLinked.sourceName || effectiveLinked.sourceId} falhou ${retriesPerSource}x; pode estar com defeito.`);
+
+    if (!allowFallbackOnLinkedFailure) {
+      const err = new Error(`Vinculo manual falhou para "${item.title || item.searchKey}" e fallback automatico esta desativado.`);
+      err.code = 'MANUAL_LINK_FAILED_NO_FALLBACK';
+      err.report = report;
+      return { ok: false, error: err, report };
+    }
 
     const preview = await getAutoLinkCandidates(item, {
       maxSourcesToTry: Number(context.cfg.maxExtensionsForAutoLink || context.cfg.maxSourcesToTryForSearch || 12),
@@ -2200,6 +2331,12 @@ async function runSmartEnqueueFlow(client, item, chapters, priority, context) {
     const fallbackMatches = collectFallbackFixedMatches(preview, ignore);
 
     for (const fixed of fallbackMatches) {
+      const safe = isFallbackMatchSafe(item, fixed, context.cfg);
+      if (!safe.ok) {
+        report.warnings.push(`Ignorando fallback ${fixed.sourceName || fixed.sourceId} / ${fixed.mangaTitle || ''}: ${safe.reason}`);
+        continue;
+      }
+
       report.sourceSwitches += 1;
       const tried = await tryFixedMatchWithRetries(client, item, chapters, priority || [], base, fixed, retriesPerSource);
       report.attemptsTotal += tried.attempts.length;
@@ -2295,6 +2432,12 @@ async function tryFallbackEnqueueAfter500(client, item, chapters, priority, opti
   const attempts = [];
 
   for (const fixed of fallbackMatches) {
+    const safe = isFallbackMatchSafe(item, fixed, cfg);
+    if (!safe.ok) {
+      attempts.push({ fixed, error: `unsafe-fallback:${safe.reason}` });
+      continue;
+    }
+
     try {
       const result = await searchAndEnqueue(
         client,
@@ -2416,7 +2559,9 @@ async function enqueueFromList({ dry, priority, limit = 200, allowedLangs = [], 
   }
   const output = [];
   const registry = loadDownloadsRegistry();
-  const manualLinks = getManualLinks(cfg);
+  const libraryIndex = await loadSuwayomiLibraryIndex({ client, listSources });
+  const libraryEntries = libraryIndex.entries;
+  const sourceNameById = libraryIndex.sourceNameById;
   let skippedAlreadyProcessed = 0;
   const notFound = [];
 
@@ -2424,7 +2569,13 @@ async function enqueueFromList({ dry, priority, limit = 200, allowedLangs = [], 
     const chapters = buildWantedChapterNumbers(item.progress || 0, capsAhead);
 
     const itemKey = getItemProcessKey(item);
-    const linked = manualLinks[itemKey] || null;
+    const linked = resolveItemLibraryLink({
+      item,
+      libraryEntries,
+      sourceNameById,
+      strictMinScore: Number(cfg.strictMinScore || 88),
+      scoreCandidate: scoreCandidateAgainstItemTitles
+    });
 
     if (dry) {
       const row = { item, chapters, dry: true };
@@ -2449,21 +2600,13 @@ async function enqueueFromList({ dry, priority, limit = 200, allowedLangs = [], 
       }
       const result = smart.result;
 
-      if (cfg.persistSwitchedSourceLink !== false && result && result.fallbackUsed && result.source && result.manga) {
-        const prev = linked || null;
-        const nextLink = setManualLink(item, {
-          sourceId: String(result.source.id),
-          sourceName: result.source.name || String(result.source.id),
-          mangaId: Number(result.manga.id),
-          mangaTitle: result.manga.title || item.title || ''
-        });
-        result.linkUpdated = true;
-        result.previousLink = prev;
-        result.currentLink = nextLink;
+      if (result && result.fallbackUsed && result.source && result.manga) {
+        result.linkUpdated = false;
+        result.linkPersistSkippedReason = 'library-is-source-of-truth';
       }
 
       if (result && result.alreadyQueuedOrDownloaded) {
-        if (cfg.cleanupLibraryDuplicates !== false) {
+        if (cfg.cleanupLibraryDuplicates === true) {
           const dedupe = await cleanupLibraryDuplicatesForItem(client, item, {
             sourceId: result.source && result.source.id,
             mangaId: result.manga && result.manga.id
@@ -2533,7 +2676,7 @@ async function enqueueFromList({ dry, priority, limit = 200, allowedLangs = [], 
       };
       saveDownloadsRegistry(registry);
 
-      if (cfg.cleanupLibraryDuplicates !== false) {
+      if (cfg.cleanupLibraryDuplicates === true) {
         const dedupe = await cleanupLibraryDuplicatesForItem(client, item, {
           sourceId: result.source && result.source.id,
           mangaId: result.manga && result.manga.id
@@ -2611,7 +2754,7 @@ async function buildBatchAutoLinkPreview(options = {}) {
   const concurrency = Math.max(1, Math.min(20, Number(options.concurrency || 6)));
   const maxSourcesToTry = Math.max(1, Number(options.maxSourcesToTry || 12));
 
-  const rows = listMangaItemsForManualLink(Math.max(300, limit * 2));
+  const rows = await listMangaItemsForManualLink(Math.max(300, limit * 2));
   const queue = (onlyUnlinked ? rows.filter(r => !r.linked) : rows).slice(0, limit);
 
   const out = [];
@@ -2669,7 +2812,7 @@ async function warmAutoLinkCache(options = {}) {
   const maxSourcesToTry = Math.max(1, Number(options.maxSourcesToTry || 12));
   const forceRefresh = Boolean(options.forceRefresh);
 
-  const rows = listMangaItemsForManualLink(Math.max(300, limit));
+  const rows = await listMangaItemsForManualLink(Math.max(300, limit));
   const queue = (onlyUnlinked ? rows.filter(r => !r.linked) : rows).slice(0, limit);
 
   let cursor = 0;
@@ -2790,14 +2933,22 @@ async function deleteReadChaptersByAniList(options = {}) {
 
   const prepared = readListForEnqueue();
   const rows = prepared.list.slice(0, limit);
-  const manualLinks = getManualLinks(cfg);
+  const libraryIndex = await loadSuwayomiLibraryIndex({ client, listSources });
+  const sourceNameById = libraryIndex.sourceNameById;
+  const libraryEntries = libraryIndex.entries;
   const registry = loadDownloadsRegistry();
   const output = [];
 
   for (const item of rows) {
     const progress = Number(item.progress || 0);
     const key = getItemProcessKey(item);
-    const linked = manualLinks[key];
+    const linked = resolveItemLibraryLink({
+      item,
+      libraryEntries,
+      sourceNameById,
+      strictMinScore: Number(cfg.strictMinScore || 88),
+      scoreCandidate: scoreCandidateAgainstItemTitles
+    });
     const reg = registry.items[key];
     const mangaId = linked && Number(linked.mangaId)
       ? Number(linked.mangaId)
@@ -2913,13 +3064,21 @@ async function stopKomga() {
   let primaryStopped = false;
   let primaryReason = null;
   try {
-    process.kill(pid);
+    if (process.platform === 'win32') {
+      execFileSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'pipe'
+      });
+    } else {
+      process.kill(pid);
+    }
     primaryStopped = true;
   } catch (e) {
     primaryReason = e.message;
   }
 
   let aggressiveReason = null;
+  let aggressiveKilled = 0;
   if (process.platform === 'win32') {
     try {
       const ps = [
@@ -2927,20 +3086,27 @@ async function stopKomga() {
         "foreach($p in $targets){ try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {} }",
         'Write-Output ($targets | Measure-Object).Count'
       ].join('; ');
-      execFileSync('powershell.exe', ['-NoProfile', '-Command', ps], { encoding: 'utf8' });
+      const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', ps], { encoding: 'utf8' });
+      const n = Number(String(out || '').trim());
+      aggressiveKilled = Number.isFinite(n) ? n : 0;
     } catch (e) {
       aggressiveReason = e.message;
     }
   }
 
-  cfg._komgaRunnerPid = null;
+  const alreadyGone = typeof primaryReason === 'string' && /ESRCH/i.test(primaryReason);
+  const stopped = primaryStopped || aggressiveKilled > 0 || alreadyGone;
+  if (stopped) {
+    cfg._komgaRunnerPid = null;
+  }
   saveConfig(cfg);
 
   return {
-    stopped: primaryStopped,
+    stopped,
     pid,
     reason: primaryReason,
-    aggressiveReason
+    aggressiveReason,
+    aggressiveKilled
   };
 }
 
@@ -2990,31 +3156,13 @@ async function waitForDownloadsAndSyncKomga(options = {}) {
 }
 
 function toPercent(item) {
-  const p = Number(item && item.progress);
-  if (Number.isFinite(p)) {
-    if (p >= 0 && p <= 1) return Math.round(p * 100);
-    if (p >= 0 && p <= 100) return Math.round(p);
-  }
-
-  const downloaded = Number(item && (item.downloadedPages || item.downloaded || item.done));
-  const total = Number(item && (item.totalPages || item.total || item.size));
-  if (Number.isFinite(downloaded) && Number.isFinite(total) && total > 0) {
-    return Math.max(0, Math.min(100, Math.round((downloaded / total) * 100)));
-  }
-
-  return null;
+  const { toPercent: fn } = require('./features/enqueue/domain/enqueue-utils');
+  return fn(item);
 }
 
 function getQueueTitle(item) {
-  if (!item || typeof item !== 'object') return 'Unknown title';
-  return String(
-    item.mangaTitle ||
-    item.title ||
-    (item.manga && item.manga.title) ||
-    item.seriesTitle ||
-    item.id ||
-    'Unknown title'
-  );
+  const { getQueueTitle: fn } = require('./features/enqueue/domain/enqueue-utils');
+  return fn(item);
 }
 
 async function getDownloadsOverview() {
@@ -3124,136 +3272,7 @@ async function getDownloadsOverview() {
   };
 }
 
-async function organizeDownloadsForKomga(options = {}) {
-  const cfg = loadConfig();
-  const downloadsRoot = cfg.downloadsPath || (cfg.dataDir ? path.join(cfg.dataDir, 'downloads') : null);
-  const useDownloadsAsLibrary = options.useDownloadsAsLibrary == null
-    ? Boolean(cfg.komgaUseDownloadsAsLibrary !== false)
-    : Boolean(options.useDownloadsAsLibrary);
-  const libraryRoot = useDownloadsAsLibrary
-    ? downloadsRoot
-    : (cfg.komgaLibraryPath || (cfg.dataDir ? path.join(cfg.dataDir, 'komga-library') : null));
-  const force = Boolean(options.forceSync);
-  const cfgMode = cfg.komgaOrganizeMode === 'copy' ? 'copy' : 'hardlink';
-  const mode = options.mode === 'copy' || options.mode === 'hardlink' ? options.mode : cfgMode;
-  const createGhostFolders = options.createGhostFolders == null
-    ? Boolean(cfg.komgaCreateGhostFolders)
-    : Boolean(options.createGhostFolders);
-  const createSeriesMetadata = options.createSeriesMetadata == null
-    ? Boolean(cfg.komgaCreateSeriesMetadata !== false)
-    : Boolean(options.createSeriesMetadata);
-  const createSeriesCover = options.createSeriesCover == null
-    ? Boolean(cfg.komgaCreateSeriesCover !== false)
-    : Boolean(options.createSeriesCover);
-
-  if (!downloadsRoot || !fs.existsSync(downloadsRoot)) {
-    throw new Error('Downloads path does not exist.');
-  }
-  if (!libraryRoot) {
-    throw new Error('Komga library path is not configured.');
-  }
-
-  if (!force && shouldSkipKomgaSyncToday(cfg.lastKomgaLibrarySyncAt)) {
-    return {
-      downloadsRoot,
-      libraryRoot,
-      mode,
-      skippedByRecentSync: true,
-      lastSyncAt: cfg.lastKomgaLibrarySyncAt || null,
-      foundCbz: 0,
-      copied: 0,
-      linked: 0,
-      skipped: 0,
-      seriesCount: 0,
-      ghostFolders: 0,
-      metadataCreated: 0,
-      coverCreated: 0,
-      createSeriesMetadata,
-      createSeriesCover
-    };
-  }
-
-  ensureDir(libraryRoot);
-
-  const allFiles = walkFilesRecursively(downloadsRoot);
-  const cbzFiles = allFiles.filter(f => f.toLowerCase().endsWith('.cbz'));
-
-  let copied = 0;
-  let linked = 0;
-  let moved = 0;
-  let skipped = 0;
-  const touchedSeries = new Set();
-  const seriesSources = new Map();
-
-  for (const src of cbzFiles) {
-    // Never move chapters here. We only enrich existing series folders.
-    const seriesDir = path.dirname(src);
-    const series = sanitizeFsName(path.basename(seriesDir));
-    touchedSeries.add(series);
-    if (!seriesSources.has(series)) seriesSources.set(series, path.dirname(src));
-  }
-
-  const ghostFolders = 0;
-
-  let metadataCreated = 0;
-  let comicInfoCreated = 0;
-  let coverCreated = 0;
-  const metadataIndex = createSeriesMetadata ? buildListMetadataIndex() : null;
-  for (const series of touchedSeries) {
-    const seriesDir = seriesSources.get(series);
-    if (!seriesDir || !fs.existsSync(seriesDir)) continue;
-    const matched = metadataIndex ? findSeriesMetadata(series, metadataIndex) : null;
-
-    if (createSeriesMetadata) {
-      try {
-        writeSeriesMetadataFile(seriesDir, series, matched);
-        metadataCreated += 1;
-      } catch (e) {
-        // ignore metadata write failure per series
-      }
-
-      try {
-        writeSeriesComicInfoFile(seriesDir, series, matched);
-        comicInfoCreated += 1;
-      } catch (e) {
-        // ignore ComicInfo write failure per series
-      }
-    }
-
-    if (createSeriesCover) {
-      try {
-        const status = await ensureSeriesCoverFile(seriesDir, seriesSources.get(series), matched);
-        if (status === 'created' || status === 'created-from-anilist') coverCreated += 1;
-      } catch (e) {
-        // ignore cover copy failure per series
-      }
-    }
-  }
-
-  cfg.lastKomgaLibrarySyncAt = new Date().toISOString();
-  saveConfig(cfg);
-
-  return {
-    downloadsRoot,
-    libraryRoot,
-    mode,
-    foundCbz: cbzFiles.length,
-    copied,
-    linked,
-    moved,
-    skipped,
-    seriesCount: touchedSeries.size,
-    ghostFolders,
-    metadataCreated,
-    comicInfoCreated,
-    coverCreated,
-    createSeriesMetadata,
-    createSeriesCover,
-    useDownloadsAsLibrary,
-    skippedByRecentSync: false,
-    lastSyncAt: cfg.lastKomgaLibrarySyncAt || null
-  };
-}
+// organizeDownloadsForKomga is imported from komga-organizer.js (line 38)
 
 async function getChapterCoverageReport(options = {}) {
   const cfg = loadConfig();
@@ -3264,12 +3283,19 @@ async function getChapterCoverageReport(options = {}) {
 
   const prepared = readListForEnqueue();
   const list = prepared.list.slice(0, limit);
-  const links = getManualLinks(cfg);
+  const libraryIndex = await loadSuwayomiLibraryIndex({ client, listSources });
+  const sourceNameById = libraryIndex.sourceNameById;
+  const libraryEntries = libraryIndex.entries;
   const rows = [];
 
   for (const item of list) {
-    const key = getItemProcessKey(item);
-    const linked = links[key] || null;
+    const linked = resolveItemLibraryLink({
+      item,
+      libraryEntries,
+      sourceNameById,
+      strictMinScore: Number(cfg.strictMinScore || 88),
+      scoreCandidate: scoreCandidateAgainstItemTitles
+    });
     const wanted = buildWantedChapterNumbers(item.progress || 0, capsAhead);
 
     if (!linked) {
@@ -3278,7 +3304,7 @@ async function getChapterCoverageReport(options = {}) {
         progress: Number(item.progress || 0),
         wantedRange: `${wanted[0]}-${wanted[wanted.length - 1]}`,
         linked: false,
-        status: 'no-manual-link'
+        status: 'not-in-suwayomi-library'
       });
       continue;
     }

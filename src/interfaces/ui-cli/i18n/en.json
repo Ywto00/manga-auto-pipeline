@@ -28,5 +28,90 @@
   "downloads": {
     "stopped": "Suwayomi downloads stopped.",
     "stopFailed": "Failed to stop Suwayomi downloads: {{error}}"
+  },
+  "settingsFlow": {
+    "common": {
+      "yes": "yes",
+      "no": "no",
+      "empty": "(empty)",
+      "disabled": "(disabled)",
+      "all": "(all)",
+      "saveBack": "Save and back",
+      "backNoSave": "Back without saving"
+    },
+    "general": {
+      "title": "General config (edit what you want)",
+      "choice": {
+        "dataDir": "Base folder: {{value}}",
+        "komgaUseDownloadsAsLibrary": "Use Suwayomi folder for Komga: {{value}}",
+        "komgaSyncOnStart": "Komga auto sync: {{value}}",
+        "suwayomiWebUIEnabled": "Suwayomi WebUI: {{value}}",
+        "usernameAnilist": "AniList username: {{value}}",
+        "capsAhead": "Chapters ahead: {{value}}"
+      },
+      "dataDirPickerMessage": "Choose the app base folder",
+      "usernamePrompt": "Default AniList username",
+      "capsAheadPrompt": "How many chapters ahead to download per manga",
+      "capsAheadValidation": "Enter a number >= 1",
+      "saveFailedPrefix": "Configuration not saved:",
+      "saveCompleted": "Configuration completed.",
+      "summary": {
+        "jarPath": "Suwayomi JAR:",
+        "komgaJarPath": "Komga JAR:",
+        "dataDir": "Data:",
+        "downloadsPath": "Downloads:",
+        "komgaUseDownloadsAsLibrary": "Use Suwayomi folder for Komga:",
+        "komgaSyncOnStart": "Komga auto sync:",
+        "suwayomiWebUIEnabled": "Suwayomi WebUI:"
+      }
+    },
+    "search": {
+      "title": "Search config (edit what you want)",
+      "choice": {
+        "maxSourcesToTryForSearch": "Max sources per search: {{value}}",
+        "maxExtensionsForAutoLink": "Max extensions in auto-link: {{value}}",
+        "linkCacheTtlMinutes": "Cache TTL (min): {{value}}",
+        "apiTimeoutMs": "API timeout (ms): {{value}}",
+        "enqueueRetryAttempts": "Enqueue retries: {{value}}",
+        "persistSwitchedSourceLink": "Persist source switch: {{value}}",
+        "fixedSourceId": "Fixed source: {{value}}",
+        "strictTitleMatch": "Strict match: {{value}}",
+        "strictMinScore": "Minimum score: {{value}}",
+        "preferredSearchLangs": "Preferred languages: {{value}}"
+      },
+      "sourceUnavailableLog": "[SEARCH] Could not list sources on the server right now. Applying basic settings anyway.",
+      "sourceOffChoiceLabel": "Disable fixed source (use auto)",
+      "sourceChoiceLabel": "{{name}} [{{lang}}] ({{id}})",
+      "saveCompleted": "[SEARCH] Configuration saved.",
+      "summary": {
+        "maxSourcesToTryForSearch": "[SEARCH] Max sources: {{value}}",
+        "maxExtensionsForAutoLink": "[SEARCH] Max extensions in auto-link: {{value}}",
+        "linkCacheTtlMinutes": "[SEARCH] Cache TTL: {{value}} min",
+        "apiTimeoutMs": "[SEARCH] API timeout: {{value}} ms",
+        "enqueueRetryAttempts": "[SEARCH] Enqueue retries: {{value}}",
+        "persistSwitchedSourceLink": "[SEARCH] Persist source switch: {{value}}",
+        "fixedSourceId": "[SEARCH] Fixed source: {{value}}",
+        "strictTitleMatch": "[SEARCH] Strict match: {{enabled}} (minScore={{score}})",
+        "preferredSearchLangs": "[SEARCH] Preferred languages: {{value}}"
+      },
+      "maxSourcesPrompt": "Maximum sources per automatic search (1-50)",
+      "oneToFiftyValidation": "Enter a number between 1 and 50",
+      "maxExtensionsPrompt": "Max extensions/sources in auto-link (1-50)",
+      "cacheTtlPrompt": "Suggestions cache TTL (minutes, minimum 10)",
+      "minTenValidation": "Enter a number >= 10",
+      "apiTimeoutPrompt": "API call timeout (ms, minimum 5000)",
+      "minFiveThousandValidation": "Enter a number >= 5000",
+      "retryPrompt": "Enqueue retry attempts (1-5)",
+      "oneToFiveValidation": "Enter a number between 1 and 5",
+      "fixedSourceListPrompt": "Fixed source for search (faster)",
+      "fixedSourceTextPrompt": "Fixed source (sourceId) - optional, leave empty for auto",
+      "strictMinScorePrompt": "Minimum title match score (60-99)",
+      "sixtyToNinetyNineValidation": "Enter a number between 60 and 99",
+      "langsCheckboxPrompt": "Preferred languages for search (max 5; empty = all)",
+      "langsCheckboxValidation": "Select at most 5 languages",
+      "langsTextOverridePrompt": "Languages as text (ex: pt-br,en). If filled, overrides checkbox",
+      "langsTextPromptNoChoices": "Languages as text (ex: pt-br,en). Empty = all",
+      "fatalErrorPrefix": "Search settings failure:"
+    }
   }
 }
