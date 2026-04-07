@@ -139,3 +139,16 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Claude Code
+.claude/
+.claude/settings.local.json
+
+# Project JSON files (except README)
+*.json
+!README.json
+
+# Project Markdown files (except README)
+*.md
+!README.md
+

@@ -6,7 +6,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { getListPath, getDownloadsPath, getLinkCachePath } = require('../../../features/config/infra/config-store');
+const { getListPath, getDownloadsPath, getLinkCachePath } = require('../../../config/infra/config-store');
 
 // ---------------------------------------------------------------------------
 // Registry loading
@@ -257,6 +257,34 @@ function reorderSourcesByIds(sources, orderedIds = []) {
   });
 }
 
+async function getCachedAutoLinkCandidates(item, options = {}) {
+  const cfg = loadConfig();
+  const signature = buildLinkCacheSignature(item, options, cfg);
+  const cached = getCachedAutoLink(item, options, cfg);
+  if (cached) {
+    return {
+      best: cached.best,
+      sources: cached.sources,
+      cached: true
+    };
+  }
+
+  // Need to fetch from sources - this would typically use the source search
+  // For now, return empty - actual implementation would be in link-cache module
+  return {
+    best: null,
+    sources: [],
+    cached: false
+  };
+}
+
+function computeBestLocalMatch(item, linked) {
+  // Simplified version - would use findBestLibraryLinkForItem
+  if (!linked) return null;
+  // Placeholder
+  return { score: 85, matchedAgainst: item.title };
+}
+
 module.exports = {
   // Registry
   readListForEnqueue,
@@ -278,5 +306,9 @@ module.exports = {
   scoreCandidateAgainstItemTitles,
   buildSearchTermsForItem,
   buildUniqueSearchTermsForLinkResolution,
-  reorderSourcesByIds
+  reorderSourcesByIds,
+
+  // Auto-link core
+  getCachedAutoLinkCandidates,
+  computeBestLocalMatch
 };

@@ -8,10 +8,10 @@ const { startKomgaJar, waitForKomgaReady, getEffectiveKomgaJavaArgs, moveJarToMa
 const { makeApiClient, stopDownloader, waitForDownloadsToFinish } = require('../../server/infra/suwayomi-api');
 const { organizeDownloadsForKomga } = require('../../komga/infra/komga-organizer');
 
-// Helpers left in cli-logic (to be required at call time to avoid circular dep issues).
+// Helpers left in cli-logic-adapter (to be required at call time to avoid circular dep issues).
 function _cliLogic() {
   // eslint-disable-next-line global-require
-  const cliLogic = require('../../../cli-logic');
+  const cliLogic = require('../../../cli-logic-adapter');
   return cliLogic;
 }
 

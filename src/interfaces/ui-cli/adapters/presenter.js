@@ -8,7 +8,7 @@ const {
   stopDownloads,
   stopServer,
   stopKomga
-} = require('../../../cli-logic');
+} = require('../../../cli-logic-adapter');
 
 module.exports = {
   loadConfig,

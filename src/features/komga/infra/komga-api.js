@@ -14,6 +14,12 @@
  * Functions that depend on other modules import them at the top.
  */
 const axios = require('axios');
+const path = require('path');
+const fs = require('fs');
+const { loadConfig, getDataPaths } = require('../../../config/infra/config-store');
+const { buildListMetadataIndex, buildListMetadataById, readSeriesJsonMetadata, buildSeriesJsonMetadataIndex, mergeItemMetadata, findSeriesMetadata } = require('../../../features/metadata/application/metadata-index');
+const { fetchAniListMediaById } = require('../../../features/sync/infra/anilist-adapter');
+const { normalize } = require('../../../shared/utils/normalize');
 
 // ---------------------------------------------------------------------------
 // Authentication
@@ -235,6 +241,122 @@ function buildKomgaSeriesMetadataPatch(itemMeta, existingMetadata = null) {
   return Object.keys(payload).length ? payload : null;
 }
 
+async function syncKomgaSeriesMetadataFromLocal(options = {}) {
+  const cfg = loadConfig();
+  const komgaUrl = cfg.komgaUrl || 'http://localhost:25600';
+  const authCfg = buildKomgaAuthConfig(cfg);
+
+  const client = axios.create({
+    baseURL: komgaUrl,
+    timeout: 10000,
+    headers: authCfg.headers,
+    auth: authCfg.auth,
+    validateStatus: () => true
+  });
+
+  const listRes = await client.get('/api/v1/libraries');
+  if (!(listRes.status >= 200 && listRes.status < 300)) {
+    throw new Error(`Failed to list Komga libraries (HTTP ${listRes.status}).`);
+  }
+
+  const libs = Array.isArray(listRes.data)
+    ? listRes.data
+    : (Array.isArray(listRes.data && listRes.data.content) ? listRes.data.content : []);
+
+  const metadataIndex = buildListMetadataIndex();
+  const metadataById = buildListMetadataById();
+  const localMetadataIndex = buildSeriesJsonMetadataIndex([
+    cfg.downloadsPath || null,
+    cfg.komgaLibraryPath || null
+  ]);
+  const aniListByIdCache = new Map();
+  let patched = 0;
+  let skipped = 0;
+  let attempted = 0;
+  let failed = 0;
+
+  for (const lib of libs) {
+    const libraryId = lib && (lib.id || lib.libraryId);
+    if (!libraryId) continue;
+
+    let page = 0;
+    while (true) {
+      const res = await client.get('/api/v1/series', {
+        params: {
+          library_id: String(libraryId),
+          page,
+          size: 200
+        }
+      });
+
+      if (!(res.status >= 200 && res.status < 300)) break;
+
+      const content = res.data && Array.isArray(res.data.content)
+        ? res.data.content
+        : (Array.isArray(res.data) ? res.data : []);
+      if (!content.length) break;
+
+      for (const s of content) {
+        const seriesName = String((s && (s.name || (s.metadata && s.metadata.title))) || '').trim();
+        const seriesDir = s && s.url ? String(s.url) : '';
+        const seriesJsonMeta = readSeriesJsonMetadata(seriesDir);
+
+        const fromListByName = findSeriesMetadata(seriesName, metadataIndex);
+        const fromLocalByName = findSeriesMetadata(seriesName, localMetadataIndex);
+        const idFromSeriesJson = Number(seriesJsonMeta && seriesJsonMeta.id);
+        const fromListById = Number.isFinite(idFromSeriesJson) ? metadataById.get(idFromSeriesJson) : null;
+        let itemMeta = mergeItemMetadata(fromListById, fromListByName, fromLocalByName, seriesJsonMeta);
+
+        const idCandidate = Number(itemMeta && itemMeta.id);
+        const hasDescription = Boolean(itemMeta && String(itemMeta.description || '').trim());
+        if (!hasDescription && Number.isFinite(idCandidate) && idCandidate > 0) {
+          let fetched = aniListByIdCache.get(idCandidate);
+          if (fetched === undefined) {
+            try {
+              fetched = await fetchAniListMediaById(idCandidate);
+            } catch (e) {
+              fetched = null;
+            }
+            aniListByIdCache.set(idCandidate, fetched || null);
+          }
+          if (fetched) {
+            itemMeta = mergeItemMetadata(fetched, itemMeta);
+          }
+        }
+
+        if (!itemMeta) {
+          skipped += 1;
+          continue;
+        }
+
+        const payload = buildKomgaSeriesMetadataPatch(itemMeta, s && s.metadata ? s.metadata : null);
+        if (!payload) {
+          skipped += 1;
+          continue;
+        }
+
+        attempted += 1;
+        const r = await client.patch(`/api/v1/series/${encodeURIComponent(String(s.id))}/metadata`, payload);
+        if (r.status >= 200 && r.status < 300) {
+          patched += 1;
+          continue;
+        }
+        failed += 1;
+      }
+
+      if (page >= 10) break; // Safety limit
+      page += 1;
+    }
+  }
+
+  return {
+    attempted,
+    patched,
+    skipped,
+    failed
+  };
+}
+
 module.exports = {
   buildKomgaAuthHeaders,
   buildKomgaAuthConfig,
@@ -245,7 +367,6 @@ module.exports = {
   decodeHtmlEntities,
   toEnglishSummaryText,
   mapKomgaStatusFromAniList,
-  toKomgaAlternateTitles
+  toKomgaAlternateTitles,
+  syncKomgaSeriesMetadataFromLocal
 };
-
-const { loadConfig } = require('../../config/infra/config-store');

@@ -1,1 +1,0 @@
-Mudar estrutura para no caso ao inves de os programas imprimirem no console eles avisarem eventos e eles serem traduzidos na UI

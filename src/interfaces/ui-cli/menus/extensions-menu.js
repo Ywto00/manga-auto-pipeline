@@ -1,13 +1,15 @@
 const {
   loadConfig,
-  startServer,
+  startServer
+} = require('../../../features/config/infra/config-store');
+const {
   listRepos,
   addRepo,
   removeRepos,
   fetchRepoIndexes,
   getServerExtensions,
   installPackages
-} = require('../../../cli-logic');
+} = require('../../../features/extensions/application/extensions-api');
 const { ensurePrompt } = require('../input/prompt');
 
 function sleep(ms) {

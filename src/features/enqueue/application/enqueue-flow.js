@@ -13,9 +13,9 @@ const {
   getMangaChapters,
   queueChapter,
   removeMangaFromLibrary
-} = require('../../server/infra/suwayomi-api');
+} = require('../../../features/server/infra/suwayomi-api');
 
-const { searchAndEnqueueCore: searchAndEnqueue } = require('../infra/smart-enqueue');
+const { searchAndEnqueueCore: searchAndEnqueue } = require('../../enqueue/infra/smart-enqueue');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -128,7 +128,7 @@ function scoreTwoTitlesForAutoLink(inputTitle, candidateTitle) {
   return Math.min(100, Math.round((overlapA * 55) + (overlapB * 15) + (jaccard * 30) + headBonus));
 }
 
-const { scoreCandidateAgainstItemTitles } = require('../../links/domain/auto-link-core');
+const { scoreCandidateAgainstItemTitles } = require('../../../features/links/domain/auto-link-core');
 
 function isFallbackMatchSafe(item, fixed, cfg) {
   const strictMinScore = Number(cfg && cfg.strictMinScore || 88);
@@ -316,7 +316,7 @@ const {
   reorderSourcesByIds,
   buildSearchTermsForItem
 } = require('../../links/domain/auto-link-core');
-const { getAutoLinkCandidates: _getAutoLinkCandidates } = require('../links/application/auto-link');
+const { getAutoLinkCandidates: _getAutoLinkCandidates } = require('../../links/application/auto-link');
 const fs = require('fs');
 const path = require('path');
 const { getConfigPath, getListPath, getDownloadsPath, getLinkCachePath, loadConfig, saveConfig } = require('../../config/infra/config-store');

@@ -22,7 +22,6 @@ const PACKAGED_STATE_ROOT = path.join(
 );
 const PACKAGED_BOOTSTRAP_PATH = path.join(PACKAGED_STATE_ROOT, 'runtime.json');
 const DEFAULT_MANAGED_DIR = path.join(os.homedir(), 'MangaPipeline');
-const DATA_DIR_ENV_KEY = 'MANGA_PIPELINE_DATA_DIR';
 
 /** Reads the packaged bootstrap file (created when running as pkg binary) */
 function readPackagedBootstrap() {
@@ -76,13 +75,12 @@ function resolveDataRoot(explicitDataDir = null) {
   if (explicitDataDir) return toDataRootFromDir(explicitDataDir);
 
   const bootstrap = readPackagedBootstrap();
-  const envRoot = toDataRootFromDir(process.env[DATA_DIR_ENV_KEY]);
   const bootstrapRoot = toDataRootFromDir(bootstrap.dataDir);
   const legacyRepoConfigPath = path.join(DEV_DATA_ROOT, 'config.json');
   const legacyDeclaredRoot = toDataRootFromDir(readDataDirFromConfigFile(legacyRepoConfigPath));
   const defaultManagedRoot = toDataRootFromDir(DEFAULT_MANAGED_DIR);
 
-  const preferred = [envRoot, bootstrapRoot, legacyDeclaredRoot, defaultManagedRoot, DEV_DATA_ROOT]
+  const preferred = [bootstrapRoot, legacyDeclaredRoot, defaultManagedRoot, DEV_DATA_ROOT]
     .filter(Boolean);
   for (const root of preferred) {
     if (hasConfigAt(root)) return root;

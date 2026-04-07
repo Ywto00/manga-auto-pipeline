@@ -13,9 +13,9 @@
 const fs = require('fs');
 const path = require('path');
 const { normalize } = require('../../../shared/utils/normalize');
-const { loadConfig } = require('../../config/infra/config-store');
-const { buildListMetadataIndex, buildListMetadataById, buildSeriesJsonMetadataIndex, mergeItemMetadata, findSeriesMetadata } = require('../../metadata/infra/metadata-index');
-const { fetchAniListMediaById } = require('../../sync/infra/anilist-adapter');
+const { loadConfig } = require('../../../config/infra/config-store');
+const { buildListMetadataIndex, buildListMetadataById, buildSeriesJsonMetadataIndex, mergeItemMetadata, findSeriesMetadata } = require('../../../features/metadata/application/metadata-index');
+const { fetchAniListMediaById } = require('../../../features/sync/infra/anilist-adapter');
 const { decodeHtmlEntities, toEnglishSummaryText, mapKomgaStatusFromAniList, toKomgaAlternateTitles, buildKomgaSeriesMetadataPatch, ensureKomgaLibraryExists, triggerKomgaLibraryScan, triggerKomgaMetadataRefresh, buildKomgaAuthHeaders, buildKomgaAuthConfig } = require('./komga-api');
 
 const axios = require('axios');
@@ -58,7 +58,8 @@ function moveFile(src, dest) {
 function inferSeriesNameFromCbz(cbzPath, downloadsRoot) {
   const rel = path.relative(downloadsRoot, cbzPath);
   const parts = rel.split(path.sep).filter(Boolean);
-  if (parts.length >= 3) return sanitizeFsName(parts[parts.length - 2]);
+  // Prefer parent folder as series name when CBZ is already inside a series directory.
+  if (parts.length >= 2) return sanitizeFsName(parts[parts.length - 2]);
 
   const base = sanitizeFsName(path.basename(cbzPath, path.extname(cbzPath)));
   return base.replace(/\b(ch|chapter|cap|c)\s*\d+(\.\d+)?\b/gi, '').trim() || base;
@@ -324,7 +325,10 @@ async function organizeKomgaLibrary(options = {}) {
 
   // Process each series
   for (const [seriesKey, entry] of seriesMap) {
-    const seriesDir = path.join(libraryRoot, entry.seriesName);
+    const existingSourceDir = seriesDirMap.get(seriesKey);
+    const seriesDir = useDownloadsAsLibrary && existingSourceDir
+      ? existingSourceDir
+      : path.join(libraryRoot, entry.seriesName);
     ensureDir(seriesDir);
     stats.seriesCount += 1;
 
@@ -346,6 +350,10 @@ async function organizeKomgaLibrary(options = {}) {
     // Link/copy CBZ files
     for (const cbz of entry.cbzList) {
       const dest = path.join(seriesDir, path.basename(cbz));
+      if (path.resolve(cbz) === path.resolve(dest)) {
+        stats.skipped += 1;
+        continue;
+      }
       try {
         const action = linkOrCopyFile(cbz, dest, mode);
         if (action === 'linked') stats.linked += 1;

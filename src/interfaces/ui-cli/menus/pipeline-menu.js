@@ -14,7 +14,7 @@ const {
   triggerKomgaMetadataRefresh,
   syncKomgaSeriesMetadataFromLocal,
   waitForDownloadsAndSyncKomga
-} = require('../../../cli-logic');
+} = require('../../../cli-logic-adapter');
 const { ensurePrompt } = require('../input/prompt');
 const { getLocalIPv4Candidates } = require('../system/network');
 const { chooseJarPath } = require('../input/explorer-picker');
@@ -24,6 +24,7 @@ const { startBackgroundEnqueueWorker } = require('../../../features/pipeline/inf
 const { ensureJarReady } = require('../../../features/pipeline/application/jar-management');
 const { runEnqueueBackgroundTask } = require('../../../features/pipeline/application/enqueue-background-task');
 const { runKomgaPostStartTasks, runKomgaPostStartWhenReady } = require('../../../features/pipeline/application/komga-post-start');
+const ui = require('../feedback/ui-enhancements');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -31,149 +32,203 @@ function sleep(ms) {
 
 async function startPipelineUI() {
   const prompt = ensurePrompt();
-  let cfg = loadConfig();
-  if (!cfg.usernameAnilist) {
-    const ans = await prompt([{ name: 'user', message: 'Usuario AniList', default: '' }]);
-    if (!ans.user) {
-      console.log('Usuario AniList nao informado.');
-      return;
-    }
-    cfg = applyConfigValues({ usernameAnilist: ans.user });
-  }
-
-  cfg = await ensureJarReady({
-    cfg,
-    kind: 'suwayomi',
-    prompt,
-    chooseJarPath,
-    moveJarToManagedFolder,
-    applyConfigValues
-  });
+  ui.separator('🚀 Iniciar Pipeline Completo');
 
   try {
-    const suwayomi = await startServer();
-    console.log(suwayomi.ready
-      ? `[START] Suwayomi pronto em ${suwayomi.apiUrl}`
-      : '[START] Suwayomi iniciado em background.');
+    ui.NotificationManager.instance.info('Verificando configuração...');
+    let cfg = loadConfig();
+    if (!cfg.usernameAnilist) {
+      const ans = await prompt([{ name: 'user', message: ui.colors.primary('Usuário AniList') }]);
+      if (!ans.user) {
+        ui.NotificationManager.instance.warning('Usuário AniList não informado');
+        return;
+      }
+      cfg = applyConfigValues({ usernameAnilist: ans.user });
+      ui.NotificationManager.instance.success('Usuário configurado: ' + ans.user);
+    }
+
+    ui.NotificationManager.instance.info('Verificando JAR do Suwayomi...');
+    cfg = await ensureJarReady({
+      cfg,
+      kind: 'suwayomi',
+      prompt,
+      chooseJarPath,
+      moveJarToManagedFolder,
+      applyConfigValues
+    });
+
+    ui.NotificationManager.instance.info('Iniciando Suwayomi...');
+    const suwayomi = await ui.withSpinner('Iniciando servidor Suwayomi', async () => {
+      return await startServer();
+    });
 
     const ips = getLocalIPv4Candidates();
     const api = new URL(suwayomi.apiUrl || 'http://localhost:4567');
     const cfgNow = loadConfig();
     const webUiEnabled = Boolean(cfgNow.suwayomiWebUIEnabled);
-    console.log(`[START] Bind IP: ${cfgNow.serverBindIp || '0.0.0.0'}`);
-    console.log(`[START] WebUI Suwayomi: ${webUiEnabled ? 'ativada' : 'desativada'}`);
+
+    console.log('');
+    ui.separator('✅ Suwayomi Iniciado');
+    console.log(`  ${ui.colors.primary('URL da API:')} ${suwayomi.apiUrl}`);
+    console.log(`  ${ui.colors.muted('Bind IP:')} ${cfgNow.serverBindIp || '0.0.0.0'}`);
+    console.log(`  ${ui.colors.muted('WebUI:')} ${webUiEnabled ? ui.colors.success('ativada') : ui.colors.error('desativada')}`);
+
     if (ips.length) {
-      console.log(`[START] IP(s) do PC: ${ips.join(', ')}`);
-      console.log('[START] URLs para conectar no celular (mesma rede):');
+      console.log(`  ${ui.colors.muted('IPs detectados:')} ${ips.join(', ')}`);
+      console.log(ui.colors.muted('  URLs para conectar no celular (mesma rede):'));
       ips.slice(0, 4).forEach((ip, i) => {
-        console.log(`  ${i + 1}. ${api.protocol}//${ip}:${api.port}`);
+        console.log(`    ${i + 1}. ${api.protocol}//${ip}:${api.port}`);
       });
       if (webUiEnabled) {
-        console.log('[START] URL WebUI sugerida:');
-        console.log(`  ${api.protocol}//${ips[0]}:${api.port}`);
+        console.log(`  ${ui.colors.success('WebUI URL sugerida:')}`);
+        console.log(`    ${api.protocol}//${ips[0]}:${api.port}`);
       }
     } else {
-      console.log('[START] Nao foi possivel detectar IP automaticamente. Use ipconfig no Windows.');
+      console.log(`  ${ui.colors.warning('IPs não detectados automaticamente')} - execute 'ipconfig' no Windows`);
     }
-  } catch (e) {
-    console.error('[START] Falha ao iniciar Suwayomi:', describeError(e));
-    return;
-  }
 
-  const currentCfg = loadConfig();
-  const workerStart = startBackgroundEnqueueWorker();
-  if (workerStart.ok) {
-    console.log(`[ENQUEUE] Worker em background iniciado (pid=${workerStart.pid}).`);
-    console.log('[ENQUEUE] Abrindo processamento em outro console.');
-  } else {
-    console.log(`[ENQUEUE] Nao foi possivel abrir outro console (${workerStart.reason}). Usando background local.`);
-    setTimeout(() => {
-      runEnqueueBackgroundTask(currentCfg, {
-        fetchUserList,
-        enqueueFromList,
-        resolveEnqueuePrefs,
-        logger: console
-      }).catch((e) => {
-        console.error('[ENQUEUE] Falha:', describeError(e));
-        if (e && e.report) {
-          console.error(`[ENQUEUE] Diagnostico: tentativas=${Number(e.report.attemptsTotal || 0)}, trocasFonte=${Number(e.report.sourceSwitches || 0)}`);
-          if (Array.isArray(e.report.warnings) && e.report.warnings.length) {
-            e.report.warnings.slice(0, 5).forEach((w, i) => {
-              console.error(`  [WARN ${i + 1}] ${w}`);
-            });
+    const currentCfg = loadConfig();
+    const workerStart = startBackgroundEnqueueWorker();
+    if (workerStart.ok) {
+      ui.NotificationManager.instance.success(`Worker background iniciado (pid=${workerStart.pid})`);
+      console.log(`  Processo separado para enqueue rodando em outro console`);
+    } else {
+      ui.NotificationManager.instance.warning(`Usando enqueue local (${workerStart.reason})`);
+      setTimeout(() => {
+        runEnqueueBackgroundTask(currentCfg, {
+          fetchUserList,
+          enqueueFromList,
+          resolveEnqueuePrefs,
+          logger: console
+        }).catch((e) => {
+          console.error(`[ENQUEUE] Falha: ${describeError(e)}`);
+          if (e && e.report) {
+            console.error(`  Diagnóstico: tentativas=${Number(e.report.attemptsTotal || 0)}, trocasFonte=${Number(e.report.sourceSwitches || 0)}`);
+            if (Array.isArray(e.report.warnings) && e.report.warnings.length) {
+              e.report.warnings.slice(0, 5).forEach((w, i) => {
+                console.error(`  [WARN ${i + 1}] ${w}`);
+              });
+            }
           }
-        }
-      });
-    }, 300);
-  }
+        });
+      }, 300);
+    }
 
-  console.log(`[CONFIG] AniList user: ${currentCfg.usernameAnilist || '(nao definido)'}`);
-  console.log(`[CONFIG] Caps a frente: ${Number(currentCfg.capsAhead) || 5}`);
-  console.log(`[CONFIG] Max fontes por pesquisa: ${Number(currentCfg.maxSourcesToTryForSearch || 10)}`);
-  console.log(`[CONFIG] Fonte fixa: ${currentCfg.fixedSourceId || '(desativada)'}`);
-  console.log(`[CONFIG] Match rigido: ${currentCfg.strictTitleMatch === false ? 'nao' : 'sim'} (minScore=${Number(currentCfg.strictMinScore || 88)})`);
-  console.log('[START] Enqueue finalizado. Retornando ao menu principal sem aguardar downloads.');
+    // Print config summary
+    console.log('');
+    ui.separator('📋 Configuração Atual');
+    console.log(`  AniList:     ${currentCfg.usernameAnilist || ui.colors.error('não configurado')}`);
+    console.log(`  Caps ahead:  ${Number(currentCfg.capsAhead) || 5}`);
+    console.log(`  Max fontes:  ${Number(currentCfg.maxSourcesToTryForSearch || 10)}`);
+    console.log(`  Fonte fixa:  ${currentCfg.fixedSourceId || ui.colors.muted('(desativada)')}`);
+    console.log(`  Match rígido: ${currentCfg.strictTitleMatch === false ? ui.colors.warning('não') : ui.colors.success('sim')} (minScore=${Number(currentCfg.strictMinScore || 88)})`);
+    console.log('');
+    ui.NotificationManager.instance.success('Pipeline inicializado! Retornando ao menu principal.');
 
-  if (currentCfg.komgaSyncOnStart !== false) {
-    waitForDownloadsAndSyncKomga({ scanForceModifiedTime: true })
-      .then((result) => {
-        console.log('[KOMGA] Downloads finalizados. Organizacao e varrimento profundo executados automaticamente.');
-        if (result && result.scanResult) {
-          console.log(`[KOMGA] Scan profundo: modo=${result.scanResult.strategy}, jobs=${result.scanResult.triggered}.`);
-        }
-      })
-      .catch((e) => {
-        console.log(`[KOMGA] Auto-sync pos-download falhou: ${e.message}`);
-      });
+    // Automatic sync with Komga if enabled
+    if (currentCfg.komgaSyncOnStart !== false) {
+      console.log(ui.colors.info('[KOMGA] Auto-sync habilitado - aguardando downloads finalizarem...'));
+      waitForDownloadsAndSyncKomga({ scanForceModifiedTime: true })
+        .then((result) => {
+          console.log(ui.colors.success('[KOMGA] Downloads finalizados! Organização e scan executados.'));
+          if (result && result.scanResult) {
+            console.log(`  Scan: modo=${result.scanResult.strategy}, jobs=${result.scanResult.triggered}`);
+          }
+          if (result && result.organizeResult) {
+            console.log(`  Organização: ${result.organizeResult.linked} links, ${result.organizeResult.copied} copiados`);
+          }
+        })
+        .catch((e) => {
+          ui.NotificationManager.instance.warning(`Auto-sync pós-download falhou: ${e.message}`);
+        });
+    }
+
+  } catch (e) {
+    ui.NotificationManager.instance.error(`Falha ao iniciar pipeline: ${e.message}`);
   }
 }
 
 async function cleanupReadByAniListUI() {
   const prompt = ensurePrompt();
+  ui.separator('🧹 Limpeza de Capítulos Lidos (AniList)');
+
   try {
     const ans = await prompt([
       {
         type: 'confirm',
         name: 'dry',
-        message: 'Executar em dry-run (so mostrar, sem apagar)?',
+        message: 'Executar em dry-run (apenas mostrar, sem apagar)?',
         default: true
       },
       {
         name: 'limit',
-        message: 'Quantidade max de mangas para processar',
+        message: 'Quantidade máxima de mangás para processar',
         default: 200,
         validate: (v) => {
           const n = Number(v);
-          return Number.isFinite(n) && n >= 1 ? true : 'Digite um numero >= 1';
+          return Number.isFinite(n) && n >= 1 ? true : 'Digite um número >= 1';
         }
       }
     ]);
 
-    console.log('[CLEANUP] Apagando capitulos baixados ja lidos conforme progresso AniList...');
+    const dry = Boolean(ans.dry);
+    const limit = Number(ans.limit) || 200;
+
+    console.log('');
+    ui.NotificationManager.instance.info(`Varredura de capítulos lidos (dry-run: ${dry ? 'sim' : 'não'}, limite: ${limit})`);
+
+    let processed = 0, deletedTotal = 0, failedTotal = 0, skipped = 0;
+    const startTime = Date.now();
+
     const result = await deleteReadChaptersByAniList({
-      dry: Boolean(ans.dry),
-      limit: Number(ans.limit) || 200,
+      dry,
+      limit,
       onItem: (row) => {
+        processed += 1;
         if (row.skipped) {
-          console.log(`[SKIP] ${row.item.title} (${row.reason})`);
+          skipped += 1;
+          if (processed <= 50) console.log(`  ${ui.colors.muted('SKIP')} ${row.item.title} (${row.reason})`);
           return;
         }
         if (row.ok === false) {
-          console.log(`[FAIL] ${row.item.title}: ${row.error}`);
+          failedTotal += 1;
+          if (processed <= 50) console.log(`  ${ui.colors.error('FAIL')} ${row.item.title}: ${row.error}`);
           return;
         }
-        console.log(`[DONE] ${row.item.title}: candidatos=${row.candidates}, apagados=${row.deleted}, falhas=${row.failed}${row.dry ? ' [DRY]' : ''}`);
+        deletedTotal += (row.deleted || 0);
+        if (processed <= 50) {
+          console.log(`  ${ui.colors.success('OK')} ${row.item.title}: ${row.candidates} capítulos candidatos, ${row.deleted} apagados${row.dry ? ' [DRY]' : ''}`);
+        }
       }
     });
 
-    console.log(`[CLEANUP] Finalizado. Itens processados: ${result.count}`);
+    const elapsed = (Date.now() - startTime) / 1000;
+    ui.separator('Resultado da Limpeza');
+    console.log(`  Tempo: ${elapsed.toFixed(1)}s`);
+    console.log(`  Processados: ${ui.colors.info(processed)} itens`);
+    console.log(`  Apagados: ${ui.colors.success(deletedTotal)} capítulos`);
+    console.log(`  Falhas: ${ui.colors.error(failedTotal)} itens`);
+    console.log(`  Ignorados: ${ui.colors.muted(skipped)} itens`);
+
+    ui.NotificationManager.instance.success(`Limpeza concluída: ${deletedTotal} capítulos apagados de ${processed} mangás verificados`);
+
   } catch (e) {
-    console.error('Falha no cleanup AniList:', e.message);
+    ui.NotificationManager.instance.error(`Falha na limpeza: ${e.message}`);
   }
 }
 
 async function downloadsStatusUI() {
   const prompt = ensurePrompt();
+  const dashboard = new (require('../feedback/ui-enhancements')).LiveDashboard();
+  dashboard.section('Downloads', () => {
+    try {
+      const status = getDownloadsOverview();
+      return `${status.queueSize} na fila | ${(status.active || []).length} ativos`;
+    } catch (e) {
+      return '--';
+    }
+  });
+
   try {
     const mode = await prompt([
       {
@@ -209,11 +264,21 @@ async function downloadsStatusUI() {
     const cyclesMax = Math.max(0, Number(mode.cycles || 0));
     let cycle = 0;
 
+    if (dynamic) {
+      console.log('');
+      console.log('Pressione Ctrl+C para sair do monitoramento');
+      dashboard.start(intervalMs);
+    }
+
     while (true) {
       const status = await getDownloadsOverview();
-      if (dynamic) process.stdout.write('\x1Bc');
 
-      console.log(`[DOWNLOADS] Status: ${status.status} | Queue: ${status.queueSize}`);
+      if (dynamic) {
+        // Dashboard updates automatically
+      } else {
+        console.clear && console.clear();
+        console.log(`[DOWNLOADS] Status: ${status.status} | Queue: ${status.queueSize}`);
+      }
 
       if (Array.isArray(status.active) && status.active.length) {
         const activeSorted = [...status.active].sort((a, b) => {
@@ -223,138 +288,189 @@ async function downloadsStatusUI() {
           return String(a.title || '').localeCompare(String(b.title || ''));
         });
 
-        console.log('[DOWNLOADS] Mangas em download (ordenado por progresso):');
+        if (!dynamic) console.log('[DOWNLOADS] Mangas em download (ordenado por progresso):');
         activeSorted.slice(0, 50).forEach((m, i) => {
-          const p = Number.isFinite(Number(m.percent)) ? Number(m.percent) : null;
-          const pct = p == null ? ' --%' : `${String(p).padStart(3, ' ')}%`;
+          const p = Number.isFinite(Number(m.percent)) ? null : Number(m.percent);
+          const pct = p == null ? ' --%' : `${String(Math.round(p)).padStart(3, ' ')}%`;
           const bars = p == null
             ? '..........'
-            : `${'#'.repeat(Math.max(0, Math.min(10, Math.round(p / 10))))}${'.'.repeat(10 - Math.max(0, Math.min(10, Math.round(p / 10))))}`;
-          console.log(`${String(i + 1).padStart(2, '0')}. [${bars}] ${pct} | fila=${m.chaptersInQueue} | ${m.title}`);
+            : `${'█'.repeat(Math.max(0, Math.min(10, Math.round(p / 10))))}${'░'.repeat(10 - Math.max(0, Math.min(10, Math.round(p / 10))))}`;
+
+          if (dynamic) {
+            // Show only progress bar in compact mode
+            process.stdout.write(`\r${String(i + 1).padStart(2, '0')}. ${bars} ${pct} | ${m.title.substring(0, 50)}`);
+          } else {
+            console.log(`${String(i + 1).padStart(2, '0')}. [${bars}] ${pct} | fila=${m.chaptersInQueue} | ${m.title}`);
+          }
 
           const diag = m.diag || null;
-          if (diag) {
+          if (diag && !dynamic) {
             console.log(`    - tentativas=${Number(diag.attemptsTotal || 0)} | trocasFonte=${Number(diag.sourceSwitches || 0)} | fonteAtual=${diag.sourceName || 'auto'}`);
             const firstWarning = Array.isArray(diag.warnings) && diag.warnings.length ? diag.warnings[0] : '';
             if (firstWarning) {
               console.log(`    - aviso: ${firstWarning}`);
             }
-            const badSources = Array.isArray(diag.sourceAttempts)
-              ? diag.sourceAttempts.filter(s => Number(s.failedAttempts || 0) > 0).slice(0, 2)
-              : [];
-            badSources.forEach(s => {
-              console.log(`    - fail ${s.sourceName || s.sourceId || 'source'}: ${Number(s.failedAttempts || 0)} tentativa(s)${s.lastError ? ` | ultimoErro=${s.lastError}` : ''}`);
-            });
           }
         });
       } else {
-        console.log('[DOWNLOADS] Sem itens ativos na fila no momento.');
+        if (!dynamic) console.log('[DOWNLOADS] Sem itens ativos na fila no momento.');
       }
 
       if (Array.isArray(status.failedRecent) && status.failedRecent.length) {
-        console.log('[DOWNLOADS] Falhas recentes de enqueue:');
-        status.failedRecent.slice(0, 10).forEach((f, i) => {
-          const meta = f.enqueueMeta || {};
-          console.log(`  ${i + 1}. ${f.title} -> ${f.error}`);
-          console.log(`     tentativas=${Number(meta.attemptsTotal || 0)} | trocasFonte=${Number(meta.sourceSwitches || 0)}`);
-        });
+        if (dynamic) {
+          console.log(`\n[Falhas recentes: ${status.failedRecent.length}]`);
+        } else {
+          console.log('[DOWNLOADS] Falhas recentes de enqueue:');
+          status.failedRecent.slice(0, 10).forEach((f, i) => {
+            const meta = f.enqueueMeta || {};
+            console.log(`  ${i + 1}. ${f.title} -> ${f.error}`);
+            console.log(`     tentativas=${Number(meta.attemptsTotal || 0)} | trocasFonte=${Number(meta.sourceSwitches || 0)}`);
+          });
+        }
       }
 
-      if (Array.isArray(status.files) && status.files.length) {
-        const filesSorted = [...status.files].sort((a, b) => String(a).localeCompare(String(b)));
-        console.log('[DOWNLOADS] Itens na pasta de downloads (ordenado):');
-        filesSorted.slice(0, 20).forEach((name, i) => console.log(`${String(i + 1).padStart(2, '0')}. ${name}`));
+      console.log(`\n[CONFIG] AniList: ${status.config.usernameAnilist || '(nao definido)'} | Caps: ${status.config.capsAhead} | Downloads: ${status.config.downloadsPath}`);
+
+      if (!dynamic) {
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
+        console.clear && console.clear();
       } else {
-        console.log('[DOWNLOADS] Nenhum arquivo/pasta encontrado na pasta de downloads.');
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
       }
 
-      console.log(`[CONFIG] AniList user: ${status.config.usernameAnilist || '(nao definido)'}`);
-      console.log(`[CONFIG] Caps a frente: ${status.config.capsAhead}`);
-      console.log(`[CONFIG] Downloads path: ${status.config.downloadsPath || '(nao definido)'}`);
-
-      if (!dynamic) break;
-      cycle += 1;
-      if (status.queueSize <= 0) {
-        console.log('[DOWNLOADS] Fila vazia. Encerrando monitor dinamico.');
+      if (!dynamic) cycle += 1;
+      if (status.queueSize <= 0 && dynamic) {
+        console.log('\n[DOWNLOADS] Fila vazia. Encerrando monitor dinamico.');
         break;
       }
       if (cyclesMax > 0 && cycle >= cyclesMax) {
         console.log('[DOWNLOADS] Limite de ciclos atingido. Encerrando monitor dinamico.');
         break;
       }
-      await sleep(intervalMs);
     }
+
+    dashboard.stop();
   } catch (e) {
+    dashboard.stop();
     console.error('Falha ao ler status de downloads:', e.message);
   }
 }
 
 async function organizeKomgaLibraryUI() {
+  const prompt = ensurePrompt();
   const cfg = loadConfig();
-  const mode = cfg.komgaOrganizeMode === 'copy' ? 'copy' : 'hardlink';
-  const createGhostFolders = cfg.komgaCreateGhostFolders === true;
-  const createSeriesMetadata = cfg.komgaCreateSeriesMetadata !== false;
-  const createSeriesCover = cfg.komgaCreateSeriesCover !== false;
+  const defaultMode = cfg.komgaOrganizeMode === 'copy' ? 'copy' : 'hardlink';
+  const defaultGhost = cfg.komgaCreateGhostFolders === true;
+  const defaultMeta = cfg.komgaCreateSeriesMetadata !== false;
+  const defaultCover = cfg.komgaCreateSeriesCover !== false;
+
+  ui.separator('📚 Organizar Biblioteca Komga');
 
   try {
-    const result = await organizeDownloadsForKomga({
-      mode,
-      createGhostFolders,
-      createSeriesMetadata,
-      createSeriesCover,
+    const ans = await prompt([
+      {
+        type: 'list',
+        name: 'mode',
+        message: 'Modo de organização',
+        choices: [
+          { name: 'Hardlink (recomendado - economiza espaço)', value: 'hardlink' },
+          { name: 'Copy (cria cópias independentes)', value: 'copy' }
+        ],
+        default: defaultMode
+      },
+      {
+        type: 'confirm',
+        name: 'createGhost',
+        message: 'Criar pastas fantasma para séries sem arquivos?',
+        default: defaultGhost
+      },
+      {
+        type: 'confirm',
+        name: 'createMetadata',
+        message: 'Gerar series.json com metadados do AniList?',
+        default: defaultMeta
+      },
+      {
+        type: 'confirm',
+        name: 'createCover',
+        message: 'Gerar capas das séries?',
+        default: defaultCover
+      }
+    ]);
+
+    const options = {
+      mode: ans.mode,
+      createGhostFolders: ans.createGhost,
+      createSeriesMetadata: ans.createMetadata,
+      createSeriesCover: ans.createCover,
       forceSync: true
+    };
+
+    ui.NotificationManager.instance.info('Organizando biblioteca Komga...');
+    const result = await ui.withSpinner('Varredura e organização em andamento', async () => {
+      return await organizeDownloadsForKomga(options);
     });
 
+    // Save preferences
+    applyConfigValues({
+      komgaOrganizeMode: ans.mode,
+      komgaCreateGhostFolders: ans.createGhost,
+      komgaCreateSeriesMetadata: ans.createMetadata,
+      komgaCreateSeriesCover: ans.createCover
+    });
+
+    ui.separator('✅ Organização Concluída');
+    console.log(`  Biblioteca: ${result.libraryRoot}`);
+    console.log(`  Modo: ${result.mode}`);
+    console.log(`  CBZ encontrados: ${result.foundCbz}`);
+    console.log(`  Links: ${ui.colors.success(result.linked)} | Copiados: ${result.copied} | Ignorados: ${result.skipped}`);
+    console.log(`  Séries: ${result.seriesCount} | Pastas fantasma: ${result.ghostFolders}`);
+    console.log(`  series.json: ${result.metadataCreated} gerados`);
+    console.log(`  Capas: ${result.coverCreated} geradas`);
+
     if (result.skippedByRecentSync) {
-      console.log(`[KOMGA] Organizacao ignorada: ultima sincronizacao foi hoje (${result.lastSyncAt || 'agora'}).`);
-      console.log('[KOMGA] Para sincronizar novamente no mesmo dia, ajuste manualmente lastKomgaLibrarySyncAt no config.');
+      console.log(`\n${ui.colors.warning('⚠️  AVISO')}: Organização ignorada - última sincronização foi hoje (${result.lastSyncAt || 'agora'}).`);
+      console.log('  Para sincronizar novamente no mesmo dia, ajuste manualmente lastKomgaLibrarySyncAt no config.');
       return;
     }
 
-    applyConfigValues({
-      komgaOrganizeMode: mode,
-      komgaCreateGhostFolders: createGhostFolders,
-      komgaCreateSeriesMetadata: createSeriesMetadata,
-      komgaCreateSeriesCover: createSeriesCover
-    });
-
-    console.log(`[KOMGA] Organizacao concluida em: ${result.libraryRoot}`);
-    console.log(`[KOMGA] Modo: ${result.mode}`);
-    console.log(`[KOMGA] CBZ encontrados: ${result.foundCbz}`);
-    console.log(`[KOMGA] linked=${result.linked}, copied=${result.copied}, skipped=${result.skipped}`);
-    console.log(`[KOMGA] Series: ${result.seriesCount}, ghostFolders=${result.ghostFolders}`);
-    console.log(`[KOMGA] series.json gerados: ${result.metadataCreated}`);
-    console.log(`[KOMGA] covers geradas: ${result.coverCreated}`);
-    console.log(`[KOMGA] ultima sincronizacao: ${result.lastSyncAt || '(nao registrado)'}`);
+    // Trigger Komga operations
+    console.log('\n🔄 Atualizando Komga...');
 
     try {
       const deepScan = await triggerKomgaLibraryScan({ scanDeep: true, scanForceModifiedTime: true });
-      console.log(`[KOMGA] Varrimento profundo disparado (modo=${deepScan.strategy}, jobs=${deepScan.triggered}).`);
+      console.log(`  ${ui.colors.success('✓')} Scan profundo: ${deepScan.strategy} (${deepScan.triggered} jobs)`);
     } catch (e) {
-      console.log(`[KOMGA] Nao foi possivel disparar varrimento profundo: ${e.message}`);
+      console.log(`  ${ui.colors.error('✗')} Scan falhou: ${e.message}`);
     }
 
     try {
       const refresh = await triggerKomgaMetadataRefresh();
-      console.log(`[KOMGA] Refresh de metadata disparado (modo=${refresh.strategy}, jobs=${refresh.triggered}).`);
+      console.log(`  ${ui.colors.success('✓')} Refresh metadata: ${refresh.strategy} (${refresh.triggered} jobs)`);
     } catch (e) {
-      console.log(`[KOMGA] Nao foi possivel disparar refresh de metadata: ${e.message}`);
+      console.log(`  ${ui.colors.error('✗')} Refresh falhou: ${e.message}`);
     }
 
     try {
       const patched = await syncKomgaSeriesMetadataFromLocal();
-      console.log(`[KOMGA] Metadata aplicada direto via API: tentadas=${patched.attempted}, atualizadas=${patched.patched}, sem-match=${patched.skipped}, falhas=${patched.failed}.`);
+      console.log(`  ${ui.colors.success('✓')} Metadata API: ${patched.patched}/${patched.attempted} atualizadas, ${patched.skipped} sem match, ${patched.failed} falhas`);
     } catch (e) {
-      console.log(`[KOMGA] Nao foi possivel aplicar metadata direta: ${e.message}`);
+      console.log(`  ${ui.colors.error('✗')} Metadata API falhou: ${e.message}`);
     }
+
+    ui.NotificationManager.instance.success('Organização Komga completa!');
+
   } catch (e) {
-    console.error('[KOMGA] Falha ao organizar biblioteca:', e.message);
+    ui.NotificationManager.instance.error(`Falha ao organizar Komga: ${e.message}`);
   }
 }
 
 async function startKomgaUI() {
+  const prompt = ensurePrompt();
+  ui.separator('📺 Iniciar Komga Media Server');
+
   try {
-    const prompt = ensurePrompt();
+    ui.NotificationManager.instance.info('Verificando JAR do Komga...');
     let cfg = loadConfig();
     cfg = await ensureJarReady({
       cfg,
@@ -364,8 +480,12 @@ async function startKomgaUI() {
       moveJarToManagedFolder,
       applyConfigValues
     });
+
     const needsFirstKomgaLogin = !cfg.komgaUsername || !cfg.komgaPassword;
 
+    // Pre-start organization
+    console.log('');
+    ui.NotificationManager.instance.info('Organizando biblioteca antes de iniciar...');
     const organizeResult = await organizeDownloadsForKomga({
       mode: cfg.komgaOrganizeMode === 'copy' ? 'copy' : 'hardlink',
       createGhostFolders: cfg.komgaCreateGhostFolders === true,
@@ -376,76 +496,104 @@ async function startKomgaUI() {
     });
 
     if (!organizeResult.skippedByRecentSync) {
-      console.log(`[KOMGA] Organizacao pre-start concluida em ${organizeResult.libraryRoot}`);
-      console.log(`[KOMGA] moved=${organizeResult.moved || 0}, linked=${organizeResult.linked}, copied=${organizeResult.copied}, skipped=${organizeResult.skipped}`);
-    }
-
-    const result = await startKomga();
-    if (result.ready) {
-      console.log(`[KOMGA] Komga pronto em ${result.komgaUrl}`);
+      console.log(`  ${ui.colors.success('✓')} Organização concluída em: ${organizeResult.libraryRoot}`);
+      console.log(`    Links: ${organizeResult.linked} | Copiados: ${organizeResult.copied} | Ignorados: ${organizeResult.skipped}`);
     } else {
-      console.log(`[KOMGA] Komga iniciado em background (pid=${result.pid}). URL: ${result.komgaUrl}`);
+      console.log(`  ${ui.colors.warning('⚠')} Organização ignorada (sync recente: ${organizeResult.lastSyncAt || 'hoje'})`);
     }
-    console.log(`[KOMGA] JAR em uso: ${result.cfg.komgaJarPath}`);
 
+    // Start Komga
+    ui.NotificationManager.instance.info('Iniciando servidor Komga...');
+    const result = await ui.withSpinner('Inicializando Komga', async () => {
+      return await startKomga();
+    });
+
+    if (result.ready) {
+      console.log(`\n${ui.colors.success('✅ Komga está pronto!')}`);
+      console.log(`  ${ui.colors.primary('URL:')} ${result.komgaUrl}`);
+    } else {
+      console.log(`\n${ui.colors.warning('⏳ Komga iniciado em background')}`);
+      console.log(`  ${ui.colors.primary('URL:')} ${result.komgaUrl}`);
+      console.log(`  PID: ${result.pid}`);
+    }
+    console.log(`  ${ui.colors.muted('JAR:')} ${result.cfg.komgaJarPath}`);
+
+    // First login handling
     if (result.ready && needsFirstKomgaLogin) {
-      console.log('[KOMGA] Primeiro acesso detectado: se ainda nao criou usuario/senha, abra o Komga e crie agora.');
-      console.log(`[KOMGA] Link: ${result.komgaUrl}`);
+      console.log(`\n${ui.colors.warning('🔐 Primeiro acesso detectado')}`);
+      console.log(`  ${ui.colors.muted('Se ainda não criou usuário/senha, abra o link acima e crie agora.')}`);
+      console.log(`  Link: ${result.komgaUrl}\n`);
 
-      await prompt([
+      const confirm = await prompt([
         {
           type: 'confirm',
-          name: 'continueAfterLogin',
-          message: 'Ja concluiu o login/cadastro no Komga? (continuar)',
+          name: 'continue',
+          message: 'Já concluiu o login/cadastro no Komga?',
           default: true
         }
       ]);
 
-      const ans = await prompt([
-        {
-          name: 'komgaUsername',
-          message: 'Usuario do Komga',
-          default: String(cfg.komgaUsername || '').trim()
-        },
-        {
-          type: 'password',
-          name: 'komgaPassword',
-          message: 'Senha do Komga',
-          mask: '*',
-          validate: (v) => String(v || '').trim().length ? true : 'Informe a senha do Komga'
-        }
-      ]);
+      if (confirm.continue) {
+        const ans = await prompt([
+          {
+            name: 'username',
+            message: 'Usuário do Komga',
+            default: String(cfg.komgaUsername || '').trim()
+          },
+          {
+            type: 'password',
+            name: 'password',
+            message: 'Senha do Komga',
+            mask: '*',
+            validate: (v) => String(v || '').trim().length ? true : 'Informe a senha'
+          }
+        ]);
 
-      cfg = applyConfigValues({
-        komgaUsername: String(ans.komgaUsername || '').trim(),
-        komgaPassword: String(ans.komgaPassword || '').trim()
-      });
+        cfg = applyConfigValues({
+          komgaUsername: String(ans.username || '').trim(),
+          komgaPassword: String(ans.password || '').trim()
+        });
+        ui.NotificationManager.instance.success('Credenciais salvas');
+      }
     }
 
+    // Post-start tasks
     if (result.ready) {
+      console.log('\n🔄 Executando tarefas pós-inicialização...');
       await runKomgaPostStartTasks(cfg, {
         ensureKomgaLibraryExists,
         triggerKomgaLibraryScan,
         triggerKomgaMetadataRefresh,
         syncKomgaSeriesMetadataFromLocal,
-        logger: console
+        logger: {
+          info: (msg) => console.log(`  ${ui.colors.muted('ℹ')} ${msg}`),
+          warn: (msg) => console.log(`  ${ui.colors.warning('⚠')} ${msg}`),
+          error: (msg) => console.log(`  ${ui.colors.error('✗')} ${msg}`)
+        }
       });
+      ui.NotificationManager.instance.success('Komga configurado e sincronizado!');
     } else {
-      console.log('[KOMGA] Iniciado em background; aguardando ficar pronto para garantir biblioteca e sync...');
+      console.log('\n⏳ Aguardando background ficar pronto...');
       runKomgaPostStartWhenReady(cfg, {
         ensureKomgaLibraryExists,
         triggerKomgaLibraryScan,
         triggerKomgaMetadataRefresh,
         syncKomgaSeriesMetadataFromLocal,
-        logger: console,
+        logger: {
+          info: (msg) => console.log(`  ${ui.colors.muted('ℹ')} ${msg}`),
+          warn: (msg) => console.log(`  ${ui.colors.warning('⚠')} ${msg}`),
+          error: (msg) => console.log(`  ${ui.colors.error('✗')} ${msg}`)
+        },
         tries: 24,
         intervalMs: 2500
       }).catch((e) => {
-        console.log(`[KOMGA] Pos-start automatico falhou: ${e.message}`);
+        ui.NotificationManager.instance.warning(`Auto-config pós-start falhou: ${e.message}`);
       });
+      ui.NotificationManager.instance.success('Komga em background; config automática iniciada');
     }
+
   } catch (e) {
-    console.error('[KOMGA] Falha ao iniciar Komga:', e.message);
+    ui.NotificationManager.instance.error(`Falha ao iniciar Komga: ${e.message}`);
   }
 }
 
