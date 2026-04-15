@@ -1,3 +1,5 @@
+const ui = require('../feedback/ui-enhancements');
+
 module.exports = function createSettingsMenu(deps) {
   const {
     t,
@@ -38,23 +40,34 @@ module.exports = function createSettingsMenu(deps) {
     };
 
     while (true) {
+      ui.separator('⚙️ Configurações');
+
       const ans = await prompt([
         {
           type: 'list',
           name: 'act',
-          message: t('menu.settings.title'),
+          message: ui.colors.primary('🎯 Menu de Configurações'),
           choices: [
-            choices.general,
-            choices.search,
-            choices.extensions,
-            choices.links,
-            choices.back
+            { name: `${ui.colors.primary('⚙️ ')} ${choices.general}`, value: choices.general },
+            { name: `${ui.colors.info('🔍 ')} ${choices.search}`, value: choices.search },
+            { name: `${ui.colors.warning('📦 ')} ${choices.extensions}`, value: choices.extensions },
+            { name: `${ui.colors.success('🔗 ')} ${choices.links}`, value: choices.links },
+            '---',
+            { name: `${ui.colors.muted('◀️ ')} ${choices.back}`, value: choices.back }
           ]
         }
       ]);
 
       if (ans.act === choices.back) return;
-      if (handlers[ans.act]) await handlers[ans.act]();
+      if (handlers[ans.act]) {
+        try {
+          ui.separator();
+          await handlers[ans.act]();
+          ui.separator();
+        } catch (e) {
+          ui.NotificationManager.instance.error(`Erro: ${e.message}`);
+        }
+      }
     }
   }
 

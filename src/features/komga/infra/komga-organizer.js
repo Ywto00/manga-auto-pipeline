@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const { normalize } = require('../../../shared/utils/normalize');
 const { loadConfig } = require('../../../config/infra/config-store');
-const { buildListMetadataIndex, buildListMetadataById, buildSeriesJsonMetadataIndex, mergeItemMetadata, findSeriesMetadata } = require('../../../features/metadata/application/metadata-index');
+const { buildListMetadataIndex, buildListMetadataById, buildSeriesJsonMetadataIndex, mergeItemMetadata, findSeriesMetadata } = require('../../../features/metadata/infra/metadata-index');
 const { fetchAniListMediaById } = require('../../../features/sync/infra/anilist-adapter');
 const { decodeHtmlEntities, toEnglishSummaryText, mapKomgaStatusFromAniList, toKomgaAlternateTitles, buildKomgaSeriesMetadataPatch, ensureKomgaLibraryExists, triggerKomgaLibraryScan, triggerKomgaMetadataRefresh, buildKomgaAuthHeaders, buildKomgaAuthConfig } = require('./komga-api');
 

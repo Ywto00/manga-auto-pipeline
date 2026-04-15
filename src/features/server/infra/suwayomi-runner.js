@@ -19,12 +19,16 @@ const axios = require('axios');
  * @returns {{ proc: import('child_process').ChildProcess, apiUrl: string, stop: Function }}
  */
 function startSuwayomiJar(cfg) {
+  const webUIEnabled = cfg.webUIEnabled != null
+    ? Boolean(cfg.webUIEnabled)
+    : Boolean(cfg.suwayomiWebUIEnabled);
+
   const configOverrides = {
     'server.rootDir': cfg.dataDir,
     'server.downloadsPath': cfg.downloadsPath || path.join(cfg.dataDir, 'downloads'),
     'server.systemTrayEnabled': false,
     'server.initialOpenInBrowserEnabled': false,
-    'server.webUIEnabled': Boolean(cfg.webUIEnabled),
+    'server.webUIEnabled': webUIEnabled,
     'server.ip': cfg.serverBindIp || '0.0.0.0',
     'server.downloadAsCbz': true,
     'server.maxSourcesInParallel': Number(cfg.maxSourcesInParallel) || 6
@@ -140,7 +144,12 @@ async function waitForSuwayomiReady(apiUrl, timeout = 30000, interval = 1000) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
     try {
-      if ((await axios.get(apiUrl, { timeout: 3000 })).status === 200) return true;
+      const aboutUrl = `${String(apiUrl || '').replace(/\/+$/, '')}/api/v1/settings/about`;
+      const res = await axios.get(aboutUrl, {
+        timeout: 3000,
+        validateStatus: () => true
+      });
+      if (res.status >= 200 && res.status < 500) return true;
     } catch (e) { /* ignore and retry */ }
     await new Promise(r => setTimeout(r, interval));
   }

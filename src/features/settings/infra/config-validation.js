@@ -37,6 +37,7 @@ function applyConfigValues(values) {
   cfg.capsAhead = Number(cfg.capsAhead) || 5;
   cfg.maxSourcesInParallel = Number(cfg.maxSourcesInParallel) || 6;
   cfg.suwayomiWebUIEnabled = Boolean(cfg.suwayomiWebUIEnabled);
+  cfg.suwayomiOpenWebUIOnStart = cfg.suwayomiOpenWebUIOnStart === true;
 
   // Title matching
   cfg.strictTitleMatch = cfg.strictTitleMatch !== false;

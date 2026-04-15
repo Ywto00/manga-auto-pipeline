@@ -11,7 +11,8 @@ module.exports = function createMainMenu(deps) {
     startPipelineUI,
     cleanupReadByAniListUI,
     organizeKomgaLibraryUI,
-    startKomgaUI
+    startKomgaUI,
+    downloadManualMangaUI
   } = deps;
 
   function mainChoices() {
@@ -21,6 +22,7 @@ module.exports = function createMainMenu(deps) {
       startKomga: t('menu.main.choice_start_komga'),
       organizeKomga: t('menu.main.choice_organize_komga'),
       cleanupAniList: t('menu.main.choice_cleanup_anilist'),
+      downloadManual: 'Download Manual (escolher manga)',
       cancelDownloads: t('menu.main.choice_cancel_downloads'),
       exit: t('menu.main.choice_exit')
     };
@@ -73,7 +75,6 @@ module.exports = function createMainMenu(deps) {
       return cfg.komgaUrl || 'parado';
     });
 
-    return dashboard;
   }
 
   async function mainMenu() {
@@ -86,6 +87,7 @@ module.exports = function createMainMenu(deps) {
       [choices.startKomga]: startKomgaUI,
       [choices.organizeKomga]: organizeKomgaLibraryUI,
       [choices.cleanupAniList]: cleanupReadByAniListUI,
+      [choices.downloadManual]: downloadManualMangaUI,
       [choices.cancelDownloads]: stopDownloadsWithFeedback,
       [choices.exit]: async () => {
         await shutdownAll();
@@ -115,34 +117,56 @@ module.exports = function createMainMenu(deps) {
       ui.NotificationManager.instance.info('Retornando ao menu...');
     });
 
-    // Create live dashboard
-    const dashboard = createDashboard();
-
     while (true) {
-      // Start dashboard
-      dashboard.start();
+      // Show enhanced config summary with status indicators
+      ui.separator('📊 Status do Sistema');
 
-      // Show config summary
-      ui.separator('Configuração Atual');
-      console.log(`  ${ui.colors.muted('AniList:')} ${cfg.usernameAnilist || ' não configurado '}`);
-      console.log(`  ${ui.colors.muted('Downloads:')} ${cfg.downloadsPath || ' não configurado '}`);
-      console.log(`  ${ui.colors.muted('Modo de organização:')} ${cfg.komgaOrganizeMode || 'hardlink'}`);
+      // AniList status with icon
+      const anilistStatus = cfg.usernameAnilist
+        ? `${ui.colors.success('✓')} ${cfg.usernameAnilist}`
+        : `${ui.colors.error('✗')} não configurado`;
+      console.log(`  ${ui.colors.primary('AniList:')} ${anilistStatus}`);
+
+      // Downloads path status
+      const downloadsStatus = cfg.downloadsPath
+        ? `${ui.colors.success('✓')} configurado`
+        : `${ui.colors.error('✗')} não configurado`;
+      console.log(`  ${ui.colors.primary('Downloads:')} ${downloadsStatus}`);
+
+      // Organization mode
+      console.log(`  ${ui.colors.primary('Organização:')} ${ui.colors.info(cfg.komgaOrganizeMode || 'hardlink')}`);
+
+      // Server status indicators
+      const serverStatus = presenter.isServerRunning()
+        ? `${ui.colors.success('●')} online`
+        : `${ui.colors.error('○')} offline`;
+      console.log(`  ${ui.colors.primary('Suwayomi:')} ${serverStatus}`);
+
+      const komgaStatus = presenter.isKomgaRunning()
+        ? `${ui.colors.success('●')} online`
+        : `${ui.colors.error('○')} offline`;
+      console.log(`  ${ui.colors.primary('Komga:')} ${komgaStatus}`);
+
       console.log('');
 
       const ans = await prompt([
         {
           type: 'list',
           name: 'act',
-          message: ui.colors.primary('📋 Menu Principal'),
+          message: ui.colors.primary('🎯 Menu Principal'),
           choices: [
-            ...Object.values(choices).slice(0, -1), // All except exit
-            ui.colors.error('🚪 ' + choices.exit)
+            { name: `${ui.colors.primary('⚙️ ')} ${choices.settings}`, value: choices.settings },
+            { name: `${ui.colors.success('▶️ ')} ${choices.startPipeline}`, value: choices.startPipeline },
+            { name: `${ui.colors.info('📺 ')} ${choices.startKomga}`, value: choices.startKomga },
+            { name: `${ui.colors.warning('📚 ')} ${choices.organizeKomga}`, value: choices.organizeKomga },
+            { name: `${ui.colors.error('🧹 ')} ${choices.cleanupAniList}`, value: choices.cleanupAniList },
+            { name: `${ui.colors.warning('⬇️ ')} ${choices.downloadManual}`, value: choices.downloadManual },
+            { name: `${ui.colors.warning('⏹️ ')} ${choices.cancelDownloads}`, value: choices.cancelDownloads },
+            '---',
+            { name: `${ui.colors.muted('🚪 ')} ${choices.exit}`, value: choices.exit }
           ]
         }
       ]);
-
-      // Stop dashboard before action
-      dashboard.stop();
 
       if (ans.act === choices.exit) {
         await shutdownAll();
@@ -156,13 +180,13 @@ module.exports = function createMainMenu(deps) {
           ui.separator();
 
           if (result && typeof result === 'object') {
-            // Auto-summary if function returned stats
+            // Enhanced auto-summary with icons and colors
             const stats = [];
-            if (result.patched) stats.push(`${result.patched} atualizados`);
-            if (result.skipped) stats.push(`${result.skipped} ignorados`);
-            if (result.failed) stats.push(`${result.failed} falhas`);
+            if (result.patched) stats.push(`${ui.colors.success(result.patched + ' atualizados')}`);
+            if (result.skipped) stats.push(`${ui.colors.warning(result.skipped + ' ignorados')}`);
+            if (result.failed) stats.push(`${ui.colors.error(result.failed + ' falhas')}`);
             if (stats.length) {
-              ui.NotificationManager.instance.success('Concluído: ' + stats.join(', '));
+              ui.NotificationManager.instance.success('Concluído: ' + stats.join(' | '));
             }
           } else {
             ui.NotificationManager.instance.success('Operação concluída');

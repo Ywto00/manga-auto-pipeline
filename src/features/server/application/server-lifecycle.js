@@ -30,23 +30,10 @@ async function startServer() {
   _cliLogic().syncServerConf(cfg);
   saveConfig(cfg);
 
-  const runner = startSuwayomiJar(cfg.jarPath, {
+  const runner = startSuwayomiJar(Object.assign({}, cfg, {
     javaArgs: cfg.javaArgs || [],
-    detached: true,
-    configOverrides: {
-      'server.rootDir': cfg.dataDir,
-      'server.downloadsPath': cfg.downloadsPath,
-      'server.systemTrayEnabled': false,
-      'server.initialOpenInBrowserEnabled': false,
-      'server.webUIEnabled': Boolean(cfg.suwayomiWebUIEnabled),
-      'server.ip': cfg.serverBindIp || '0.0.0.0',
-      'server.downloadAsCbz': true,
-      'server.maxSourcesInParallel': Number(cfg.maxSourcesInParallel) || 6,
-      ...(Array.isArray(cfg.extensionRepos) && cfg.extensionRepos.length
-        ? { 'server.extensionRepos': cfg.extensionRepos }
-        : {})
-    }
-  });
+    detached: true
+  }));
 
   const apiUrl = cfg.apiUrl || 'http://localhost:4567';
   let ready = false;

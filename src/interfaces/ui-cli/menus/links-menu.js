@@ -1,6 +1,11 @@
 const cliLogic = require('../../../cli-logic-adapter');
 const { ensurePrompt } = require('../input/prompt');
 const ui = require('../feedback/ui-enhancements');
+const {
+  computeBatchTransparency,
+  collectAutoSelectedKeys,
+  saveSelectedLinks
+} = require('../../../features/links/application/auto-link-batch-service');
 
 // Functions from cli-logic-adapter
 const {
@@ -13,9 +18,11 @@ const {
   getCachedAutoLinkCandidates,
   buildBatchAutoLinkPreview,
   warmAutoLinkCache,
+  warmAndBuildPreview,
   checkSourcesHealth,
   setManualLink,
   removeManualLink,
+  startServer,
   enqueueFromList,
   getSources,
   getAutoLinkCandidates
@@ -23,36 +30,33 @@ const {
 
 const { resolveEnqueuePrefs } = require('../../../features/pipeline/application/resolve-enqueue-prefs');
 
-function ansi(text, code) {
-  return `\u001b[${code}m${text}\u001b[0m`;
-}
-
+// Use ui.colors instead of raw ANSI codes
 function scoreLabel(score) {
   const n = Number(score || 0);
-  if (n >= 90) return ansi(String(n), '92');
-  if (n >= 70) return ansi(String(n), '93');
-  return ansi(String(n), '91');
+  if (n >= 90) return ui.colors.success(String(n));
+  if (n >= 70) return ui.colors.warning(String(n));
+  return ui.colors.error(String(n));
 }
 
 function matchPercentLabel(score) {
   const n = Math.max(0, Math.min(100, Number(score || 0)));
-  if (n >= 90) return ansi(`${n}%`, '92');
-  if (n >= 70) return ansi(`${n}%`, '93');
-  return ansi(`${n}%`, '91');
+  if (n >= 90) return ui.colors.success(`${n}%`);
+  if (n >= 70) return ui.colors.warning(`${n}%`);
+  return ui.colors.error(`${n}%`);
 }
 
 function chapterLabel(hasChapters) {
-  if (hasChapters === true) return ansi('chapters:ok', '92');
-  if (hasChapters === false) return ansi('chapters:none', '91');
-  return ansi('chapters:unknown', '90');
+  if (hasChapters === true) return ui.colors.success('chapters:ok');
+  if (hasChapters === false) return ui.colors.error('chapters:none');
+  return ui.colors.muted('chapters:unknown');
 }
 
 function linkedStateLabel(linked) {
-  return linked ? ansi('vinculado', '92') : ansi('sem-vinculo', '91');
+  return linked ? ui.colors.success('vinculado') : ui.colors.error('sem-vinculo');
 }
 
 function colorizeFoundTitle(title) {
-  return ansi(String(title || ''), '96');
+  return ui.colors.info(String(title || ''));
 }
 
 function truncateText(value, max = 68) {
@@ -114,10 +118,10 @@ async function showUnifiedList(rows, prompt) {
     {
       name: 'limit',
       message: 'Quantos itens listar?',
-      default: 80,
+      default: 50,
       validate: (v) => {
         const n = Number(v);
-        return Number.isFinite(n) && n >= 1 && n <= 300 ? true : 'Digite um numero entre 1 e 300';
+        return Number.isFinite(n) && n >= 1 && n <= 200 ? true : `${ui.colors.error('Erro:')} Digite um numero entre 1 e 200`;
       }
     },
     {
@@ -125,25 +129,25 @@ async function showUnifiedList(rows, prompt) {
       name: 'viewMode',
       message: 'Formato da lista',
       choices: [
-        { name: 'Compacto (recomendado)', value: 'compact' },
-        { name: 'Detalhado', value: 'detailed' }
+        { name: `${ui.colors.success('🟢 ')} Compacto (recomendado - rápido)`, value: 'compact' },
+        { name: `${ui.colors.info('📋 ')} Detalhado (com mais informações)`, value: 'detailed' }
       ],
       default: 'compact'
     }
   ]);
 
-  const limit = Number(ans.limit) || 80;
+  const limit = Number(ans.limit) || 50;
   const selected = rows.slice(0, limit);
   const showSuggestions = true;
 
   let previewsByKey = new Map();
   if (showSuggestions) {
+    ui.separator('🔄 Carregando sugestões...');
     for (const r of selected) {
       const preview = getCachedAutoLinkCandidates(r.item, {
         maxSourcesToTry: 12,
         verifyChapters: true
       });
-
       previewsByKey.set(String(r.key), {
         key: r.key,
         item: r.item,
@@ -157,53 +161,98 @@ async function showUnifiedList(rows, prompt) {
 
   const linkedRows = selected.filter(r => Boolean(r.linked));
   const unlinkedRows = selected.filter(r => !r.linked);
-  console.log(`\n[LISTA] AniList e vinculos | total=${selected.length} | vinculados=${linkedRows.length} | sem-vinculo=${unlinkedRows.length}`);
+
+  ui.separator('📋 Lista Completa');
+  console.log(`${ui.colors.muted('Total:')} ${ui.colors.info(selected.length)} | ${ui.colors.success(linkedRows.length + ' vinculados')} | ${ui.colors.error(unlinkedRows.length + ' sem vínculo')}`);
+  console.log('');
+
+  const width = Math.min(process.stdout.columns || 80, 100);
+  const divider = '─'.repeat(width);
+  console.log(ui.colors.muted(divider));
 
   selected.forEach((r, i) => {
     const preview = previewsByKey.get(String(r.key));
-    // Using a simplified match calculation since computeBestLocalMatch might not be available
-    const matchPct = r.linked ? matchPercentLabel(85) : (preview && preview.best ? matchPercentLabel(preview.best.score) : ansi('--', '90'));
-    const linkLabel = r.linked
-      ? `${ansi(r.linked.sourceName || r.linked.sourceId, '94')} / ${colorizeFoundTitle(r.linked.mangaTitle)} ${ansi(`[match:${matchPct}]`, '90')}`
-      : 'sem vinculo';
+    const linkedScore = r.linked && Number.isFinite(Number(r.linked.score))
+      ? Number(r.linked.score)
+      : null;
+    const matchPct = r.linked
+      ? (linkedScore != null ? matchPercentLabel(linkedScore) : '--')
+      : (preview && preview.best ? matchPercentLabel(preview.best.score) : '--');
 
-    const best = preview && preview.best
-      ? `${ansi(preview.best.sourceName, '94')} / ${colorizeFoundTitle(preview.best.mangaTitle)} (score=${scoreLabel(preview.best.score)} | match=${matchPercentLabel(preview.best.score)}${preview.best.matchedAgainst ? `, by='${preview.best.matchedAgainst}'` : ''}${preview.cached ? ', cache' : ''})`
-      : 'sem sugestao local';
-
-    const sourcesLine = preview && Array.isArray(preview.sources) && preview.sources.length
-      ? preview.sources
-        .slice(0, 3)
-        .map(s => {
-          const top = Array.isArray(s.mangas) && s.mangas[0] ? s.mangas[0] : null;
-          if (!top) return `${s.sourceName}[${s.lang}]`;
-          return `${s.sourceName}[${s.lang}](${scoreLabel(top.score)} ${chapterLabel(top.hasChapters)})`;
-        })
-        .join(' | ')
-      : 'sem fontes';
+    // Status icon and color
+    const isLinked = Boolean(r.linked);
+    const statusIcon = isLinked ? `${ui.colors.success('✓')}` : `${ui.colors.error('✗')}`;
+    const statusText = isLinked ? ui.colors.success('VINCULADO') : ui.colors.error('SEM VÍNCULO');
 
     if (ans.viewMode === 'compact') {
-      const statusTag = r.linked ? ansi('LINK', '92') : ansi('NO-LINK', '91');
-      const bestShort = preview && preview.best
-        ? `${preview.best.sourceName}/${truncateText(preview.best.mangaTitle, 30)} score=${Number(preview.best.score || 0)} (${Number(preview.best.score || 0)}%)${preview.cached ? ' cache' : ''}`
-        : 'sem sugestao';
-      console.log(`${String(i + 1).padStart(3, '0')}. [${statusTag}] ${truncateText(r.item.title, 62)}`);
-      console.log(`     vinculo: ${truncateText(linkLabel, 88)}`);
-      if (showSuggestions) console.log(`     sugestao: ${truncateText(bestShort, 88)}`);
-      return;
+      // Compact mode - cleaner layout
+      console.log(`${ui.colors.muted(String(i + 1).padStart(3, ' '))}. ${statusIcon} ${ui.colors.primary(truncateText(r.item.title, width - 15))}`);
+
+      if (isLinked) {
+        const linkedSource = r.linked.sourceName || r.linked.sourceId;
+        const linkedTitle = truncateText(r.linked.mangaTitle, 40);
+        console.log(`   ${ui.colors.muted('└─')} ${ui.colors.info(linkedSource)} / ${ui.colors.success(linkedTitle)} ${matchPct !== '--' ? ui.colors.muted(`(${matchPct})`) : ''}`);
+      } else if (preview && preview.best) {
+        const bestSource = preview.best.sourceName;
+        const bestTitle = truncateText(preview.best.mangaTitle, 40);
+        const score = scoreLabel(Number(preview.best.score || 0));
+        const cache = preview.cached ? ui.colors.muted('[cache]') : '';
+        console.log(`   ${ui.colors.muted('└─')} ${ui.colors.warning(bestSource)} / ${colorizeFoundTitle(bestTitle)} ${score} ${cache}`);
+      } else {
+        console.log(`   ${ui.colors.muted('└─')} ${ui.colors.error('Nenhuma sugestão disponível')}`);
+      }
+    } else {
+      // Detailed mode - more info
+      console.log(`${statusIcon} ${ui.colors.bold(truncateText(r.item.title, width - 10))} [${statusText}]`);
+
+      if (Array.isArray(r.item.altTitles) && r.item.altTitles.length) {
+        const altTitles = r.item.altTitles.slice(0, 3).join(' | ');
+        console.log(`   ${ui.colors.muted('Alt:')} ${ui.colors.info(altTitles)}`);
+      }
+
+      if (isLinked) {
+        const linkedSource = r.linked.sourceName || r.linked.sourceId;
+        const linkedTitle = r.linked.mangaTitle;
+        console.log(`   ${ui.colors.muted('Vínculo:')} ${ui.colors.success(linkedSource)} / ${colorizeFoundTitle(linkedTitle)} ${matchPct !== '--' ? ui.colors.muted(`[match:${matchPct}]`) : ''}`);
+      } else if (preview && preview.best) {
+        const bestSource = preview.best.sourceName;
+        const bestTitle = preview.best.mangaTitle;
+        const score = preview.best.score;
+        const match = matchPercentLabel(score);
+        const by = preview.best.matchedAgainst ? ` (by='${preview.best.matchedAgainst}')` : '';
+        const cache = preview.cached ? ui.colors.muted('[cache]') : '';
+        console.log(`   ${ui.colors.muted('Sugestão:')} ${ui.colors.warning(bestSource)} / ${colorizeFoundTitle(bestTitle)} ${scoreLabel(score)} ${match}${by}${cache}`);
+      } else {
+        console.log(`   ${ui.colors.muted('Sugestão:')} ${ui.colors.error('Nenhuma sugestão disponível')}`);
+      }
+
+      // Show source availability
+      if (preview && Array.isArray(preview.sources) && preview.sources.length) {
+        const sourcesLine = preview.sources
+          .slice(0, 3)
+          .map(s => {
+            const top = Array.isArray(s.mangas) && s.mangas[0] ? s.mangas[0] : null;
+            if (!top) return `${s.sourceName}[${s.lang}]`;
+            return `${s.sourceName}[${s.lang}]: ${scoreLabel(top.score)} ${chapterLabel(top.hasChapters)}`;
+          })
+          .join(' | ');
+        console.log(`   ${ui.colors.muted('Fontes:')} ${sourcesLine}`);
+      }
     }
 
-    const headerStatus = r.linked ? ansi('LINK', '92') : ansi('NO-LINK', '91');
-    console.log(`${String(i + 1).padStart(3, '0')}. [${headerStatus}] ${r.item.title}`);
-    if (Array.isArray(r.item.altTitles) && r.item.altTitles.length) {
-      console.log(`     alt: ${r.item.altTitles.slice(0, 6).join(' | ')}`);
-    }
-    console.log(`     vinculo: ${linkLabel}`);
-    if (showSuggestions) {
-      console.log(`     sugestao-local: ${best}`);
-      console.log(`     fontes-local: ${sourcesLine}`);
+    // Add spacing between items (except last)
+    if (i < selected.length - 1) {
+      console.log('');
     }
   });
+
+  console.log('');
+  console.log(ui.colors.muted(divider));
+
+  const showMore = rows.length > limit;
+  if (showMore) {
+    console.log(`${ui.colors.warning('⚠️')} Mostrando ${limit} de ${rows.length} itens. Use um limite maior para ver mais.`);
+  }
 }
 
 async function runSourceHealthCheck(prompt) {
@@ -244,6 +293,13 @@ async function runSourceHealthCheck(prompt) {
 }
 
 async function runBatchAutoMatch(rows, prompt) {
+  try {
+    await getSources();
+  } catch (e) {
+    ui.NotificationManager.instance.info('Suwayomi offline. Iniciando servidor para varredura...');
+    await startServer();
+  }
+
   const cfg = loadConfig();
   const defaultBatchLimit = Number(cfg.autoLinkBatchLimit || 80);
   const defaultBatchConcurrency = Number(cfg.autoLinkBatchConcurrency || 12);
@@ -446,6 +502,34 @@ async function runBatchAutoMatch(rows, prompt) {
   const savedCount = await saveSelectedLinks(previewRows, selectedKeys, { setManualLink });
   ui.NotificationManager.instance.success(`${savedCount} vínculos adicionados à biblioteca`);
 
+  const selectedSet = new Set(selectedKeys.map(String));
+  const rowsToUnlink = previewRows.filter(r => r.linked && !selectedSet.has(String(r.key)));
+  if (rowsToUnlink.length > 0) {
+    const unlinkAns = await prompt([
+      {
+        type: 'confirm',
+        name: 'confirmUnlink',
+        message: `Remover da biblioteca os ${rowsToUnlink.length} itens não vinculados neste lote?`,
+        default: true
+      }
+    ]);
+
+    if (unlinkAns.confirmUnlink) {
+      let unlinkedCount = 0;
+      let unlinkFail = 0;
+      for (const row of rowsToUnlink) {
+        try {
+          // Keep library aligned with links: items not selected as linked are removed.
+          await removeManualLink(row.item);
+          unlinkedCount += 1;
+        } catch (e) {
+          unlinkFail += 1;
+        }
+      }
+      console.log(`[BIBLIOTECA] Removidos: ${ui.colors.success(unlinkedCount)} | Falhas: ${ui.colors.error(unlinkFail)}`);
+    }
+  }
+
   const runAns = await prompt([
     {
       type: 'confirm',
@@ -553,16 +637,16 @@ async function createOrUpdateLink(rows, prompt) {
     ? `${runtime.linked.sourceName || runtime.linked.sourceId} / ${runtime.linked.mangaTitle}`
     : 'sem vinculo';
 
-  console.log(`\n[ITEM] ${ansi(selected.item.title, '96')}`);
+  console.log(`\n[ITEM] ${ui.colors.info(selected.item.title)}`);
   if (Array.isArray(selected.item.altTitles) && selected.item.altTitles.length) {
     console.log(`[ITEM] Alt: ${selected.item.altTitles.slice(0, 6).join(' | ')}`);
   }
   console.log(`[ITEM] Vinculo atual: ${runtimeLink}`);
   if (runtime && runtime.linked) {
     if (runtime.ok) {
-      console.log(`[ITEM] Suwayomi: ${chapterLabel(runtime.hasChapters)} | baixados=${ansi(String(runtime.downloadedCount || 0), '93')} / total=${runtime.chapterCount || 0} | maxCap=${runtime.maxDownloaded || 0}`);
+      console.log(`[ITEM] Suwayomi: ${chapterLabel(runtime.hasChapters)} | baixados=${ui.colors.success(String(runtime.downloadedCount || 0))} / total=${runtime.chapterCount || 0} | maxCap=${runtime.maxDownloaded || 0}`);
     } else {
-      console.log(`[ITEM] Suwayomi: ${ansi('erro ao consultar', '91')} (${runtime.error || 'erro desconhecido'})`);
+      console.log(`[ITEM] Suwayomi: ${ui.colors.error('erro ao consultar')} (${runtime.error || 'erro desconhecido'})`);
     }
   }
 
@@ -615,7 +699,7 @@ async function createOrUpdateLink(rows, prompt) {
       message: `Escolha a fonte para ${selected.item.title}`,
       pageSize: 20,
       choices: filteredSources.map(s => ({
-        name: `${s.name} [${s.lang}] (${s.id})${selected.linked && String(selected.linked.sourceId) === String(s.id) ? ` ${ansi('[atual]', '92')}` : ''}`,
+        name: `${s.name} [${s.lang}] (${s.id})${selected.linked && String(selected.linked.sourceId) === String(s.id) ? ` ${ui.colors.success('[atual]')}` : ''}`,
         value: String(s.id)
       }))
     }
@@ -683,14 +767,15 @@ async function manageManualLinksUI() {
         {
           type: 'list',
           name: 'act',
-          message: ui.colors.primary('🔗 Vinculos AniList <-> Fontes'),
+          message: ui.colors.primary('🔗 Gerenciar Vínculos'),
           choices: [
-            { name: '📱 Atualizar lista do AniList', value: 'refresh' },
-            { name: '📋 Ver lista completa (' + total + ' itens)', value: 'view' },
-            { name: '⚡ Varredura automática (cache + online)', value: 'batch' },
-            { name: '🩺 Testar saúde das fontes', value: 'health' },
-            { name: '🔧 Gerenciar vínculo manual', value: 'manual' },
-            { name: '🔙 Voltar', value: 'back' }
+            { name: `${ui.colors.info('📱 ')} Atualizar lista AniList`, value: 'refresh' },
+            { name: `${ui.colors.primary('📋 ')} Ver lista completa (${total} itens)`, value: 'view' },
+            { name: `${ui.colors.success('⚡ ')} Varredura automática`, value: 'batch' },
+            { name: `${ui.colors.warning('🩺 ')} Testar saúde das fontes`, value: 'health' },
+            { name: `${ui.colors.warning('🔧 ')} Gerenciar vínculo manual`, value: 'manual' },
+            '---',
+            { name: `${ui.colors.muted('🔙 ')} Voltar`, value: 'back' }
           ]
         }
       ]);
@@ -698,55 +783,59 @@ async function manageManualLinksUI() {
       if (action.act === 'back') return;
 
       if (action.act === 'refresh') {
-        ui.NotificationManager.instance.info('Atualizando lista AniList...');
-        const ok = await updateAniListSnapshot(prompt);
+        ui.separator('Atualizar Lista AniList');
+        const ok = await ui.withSpinner('Buscando dados da AniList', async () => {
+          return await updateAniListSnapshot(prompt);
+        });
         if (ok) {
           rows = await listMangaItemsForManualLink(2000);
-          ui.NotificationManager.instance.success('Lista atualizada');
+          ui.NotificationManager.instance.success('Lista AniList atualizada!');
+        } else {
+          ui.NotificationManager.instance.error('Falha ao atualizar lista');
         }
+        ui.separator();
         continue;
       }
 
       if (action.act === 'view') {
+        ui.separator('📋 Lista Completa');
         rows = await listMangaItemsForManualLink(2000);
         if (!rows.length) {
           ui.NotificationManager.instance.warning('Nenhum item elegível encontrado');
-          continue;
+        } else {
+          await showUnifiedList(rows, prompt);
         }
-        ui.separator('Lista Completa');
-        await showUnifiedList(rows, prompt);
+        ui.separator();
         continue;
       }
 
       if (action.act === 'batch') {
+        ui.separator('⚡ Varredura Automática');
         rows = await listMangaItemsForManualLink(2000);
         if (!rows.length) {
           ui.NotificationManager.instance.warning('Nenhum item elegível encontrado');
-          continue;
+        } else {
+          await runBatchAutoMatch(rows, prompt);
         }
-        ui.separator('Varredura Automática');
-        await runBatchAutoMatch(rows, prompt);
-        rows = await listMangaItemsForManualLink(2000);
         ui.separator();
         continue;
       }
 
       if (action.act === 'health') {
-        ui.separator('Verificação de Fontes');
+        ui.separator('🩺 Saúde das Fontes');
         await runSourceHealthCheck(prompt);
         ui.separator();
         continue;
       }
 
       if (action.act === 'manual') {
+        ui.separator('🔧 Gerenciamento Manual');
         rows = await listMangaItemsForManualLink(2000);
         if (!rows.length) {
           ui.NotificationManager.instance.warning('Nenhum item elegível encontrado');
-          continue;
+        } else {
+          await createOrUpdateLink(rows, prompt);
         }
-        ui.separator('Gerenciamento Manual');
-        await createOrUpdateLink(rows, prompt);
-        rows = await listMangaItemsForManualLink(2000);
         ui.separator();
         continue;
       }

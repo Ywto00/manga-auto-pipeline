@@ -17,7 +17,7 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const { loadConfig, getDataPaths } = require('../../../config/infra/config-store');
-const { buildListMetadataIndex, buildListMetadataById, readSeriesJsonMetadata, buildSeriesJsonMetadataIndex, mergeItemMetadata, findSeriesMetadata } = require('../../../features/metadata/application/metadata-index');
+const { buildListMetadataIndex, buildListMetadataById, buildSeriesJsonMetadataIndex, mergeItemMetadata, findSeriesMetadata } = require('../../../features/metadata/infra/metadata-index');
 const { fetchAniListMediaById } = require('../../../features/sync/infra/anilist-adapter');
 const { normalize } = require('../../../shared/utils/normalize');
 

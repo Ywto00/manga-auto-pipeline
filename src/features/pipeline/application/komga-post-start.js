@@ -23,13 +23,6 @@ async function runKomgaPostStartTasks(cfg, deps) {
   if (cfg.komgaSyncOnStart === false) return;
 
   try {
-    const sync = await triggerKomgaLibraryScan();
-    logger.log(`[KOMGA] Sync disparado com sucesso (modo=${sync.strategy}, jobs=${sync.triggered}).`);
-  } catch (e) {
-    logger.log(`[KOMGA] Nao foi possivel disparar sync automatico: ${e.message}`);
-  }
-
-  try {
     const refresh = await triggerKomgaMetadataRefresh();
     logger.log(`[KOMGA] Refresh de metadata disparado (modo=${refresh.strategy}, jobs=${refresh.triggered}).`);
   } catch (e) {
@@ -41,6 +34,13 @@ async function runKomgaPostStartTasks(cfg, deps) {
     logger.log(`[KOMGA] Metadata aplicada direto via API: tentadas=${patched.attempted}, atualizadas=${patched.patched}, sem-match=${patched.skipped}, falhas=${patched.failed}.`);
   } catch (e) {
     logger.log(`[KOMGA] Nao foi possivel aplicar metadata direta: ${e.message}`);
+  }
+
+  try {
+    const sync = await triggerKomgaLibraryScan();
+    logger.log(`[KOMGA] Sync disparado com sucesso (modo=${sync.strategy}, jobs=${sync.triggered}).`);
+  } catch (e) {
+    logger.log(`[KOMGA] Nao foi possivel disparar sync automatico: ${e.message}`);
   }
 }
 

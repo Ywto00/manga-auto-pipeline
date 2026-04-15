@@ -18,6 +18,7 @@ const {
 const { ensurePrompt } = require('../input/prompt');
 const { getLocalIPv4Candidates } = require('../system/network');
 const { chooseJarPath } = require('../input/explorer-picker');
+const { exec } = require('child_process');
 const { resolveEnqueuePrefs } = require('../../../features/pipeline/application/resolve-enqueue-prefs');
 const { describeError } = require('../../../features/pipeline/infra/error-utils');
 const { startBackgroundEnqueueWorker } = require('../../../features/pipeline/infra/background-enqueue-worker');
@@ -28,6 +29,20 @@ const ui = require('../feedback/ui-enhancements');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function openInBrowser(url) {
+  const target = String(url || '').trim();
+  if (!target) return;
+  if (process.platform === 'win32') {
+    exec(`start "" "${target}"`);
+    return;
+  }
+  if (process.platform === 'darwin') {
+    exec(`open "${target}"`);
+    return;
+  }
+  exec(`xdg-open "${target}"`);
 }
 
 async function startPipelineUI() {
@@ -87,6 +102,16 @@ async function startPipelineUI() {
       console.log(`  ${ui.colors.warning('IPs não detectados automaticamente')} - execute 'ipconfig' no Windows`);
     }
 
+    if (webUiEnabled && cfgNow.suwayomiOpenWebUIOnStart === true) {
+      const targetUrl = `${api.protocol}//localhost:${api.port}`;
+      try {
+        openInBrowser(targetUrl);
+        console.log(`  ${ui.colors.info('Abrindo WebUI no navegador:')} ${targetUrl}`);
+      } catch (e) {
+        console.log(`  ${ui.colors.warning('Não foi possível abrir navegador automaticamente:')} ${e.message}`);
+      }
+    }
+
     const currentCfg = loadConfig();
     const workerStart = startBackgroundEnqueueWorker();
     if (workerStart.ok) {
@@ -117,11 +142,20 @@ async function startPipelineUI() {
     // Print config summary
     console.log('');
     ui.separator('📋 Configuração Atual');
-    console.log(`  AniList:     ${currentCfg.usernameAnilist || ui.colors.error('não configurado')}`);
-    console.log(`  Caps ahead:  ${Number(currentCfg.capsAhead) || 5}`);
-    console.log(`  Max fontes:  ${Number(currentCfg.maxSourcesToTryForSearch || 10)}`);
-    console.log(`  Fonte fixa:  ${currentCfg.fixedSourceId || ui.colors.muted('(desativada)')}`);
-    console.log(`  Match rígido: ${currentCfg.strictTitleMatch === false ? ui.colors.warning('não') : ui.colors.success('sim')} (minScore=${Number(currentCfg.strictMinScore || 88)})`);
+    const anilistStatus = currentCfg.usernameAnilist
+      ? `${ui.colors.success(currentCfg.usernameAnilist)}`
+      : `${ui.colors.error('não configurado')}`;
+    console.log(`  ${ui.colors.primary('AniList:')}     ${anilistStatus}`);
+    console.log(`  ${ui.colors.primary('Caps ahead:')}  ${Number(currentCfg.capsAhead) || 5}`);
+    console.log(`  ${ui.colors.primary('Max fontes:')}  ${Number(currentCfg.maxSourcesToTryForSearch || 10)}`);
+    const fixedSource = currentCfg.fixedSourceId
+      ? `${ui.colors.info(currentCfg.fixedSourceId)}`
+      : `${ui.colors.muted('(desativada)')}`;
+    console.log(`  ${ui.colors.primary('Fonte fixa:')}  ${fixedSource}`);
+    const matchRigid = currentCfg.strictTitleMatch === false
+      ? `${ui.colors.warning('não')} (minScore=${Number(currentCfg.strictMinScore || 88)})`
+      : `${ui.colors.success('sim')} (minScore=${Number(currentCfg.strictMinScore || 88)})`;
+    console.log(`  ${ui.colors.primary('Match rígido:')}  ${matchRigid}`);
     console.log('');
     ui.NotificationManager.instance.success('Pipeline inicializado! Retornando ao menu principal.');
 
@@ -434,15 +468,8 @@ async function organizeKomgaLibraryUI() {
       return;
     }
 
-    // Trigger Komga operations
+    // Trigger Komga operations (lightweight first, heavy scan last)
     console.log('\n🔄 Atualizando Komga...');
-
-    try {
-      const deepScan = await triggerKomgaLibraryScan({ scanDeep: true, scanForceModifiedTime: true });
-      console.log(`  ${ui.colors.success('✓')} Scan profundo: ${deepScan.strategy} (${deepScan.triggered} jobs)`);
-    } catch (e) {
-      console.log(`  ${ui.colors.error('✗')} Scan falhou: ${e.message}`);
-    }
 
     try {
       const refresh = await triggerKomgaMetadataRefresh();
@@ -456,6 +483,13 @@ async function organizeKomgaLibraryUI() {
       console.log(`  ${ui.colors.success('✓')} Metadata API: ${patched.patched}/${patched.attempted} atualizadas, ${patched.skipped} sem match, ${patched.failed} falhas`);
     } catch (e) {
       console.log(`  ${ui.colors.error('✗')} Metadata API falhou: ${e.message}`);
+    }
+
+    try {
+      const deepScan = await triggerKomgaLibraryScan({ scanDeep: true, scanForceModifiedTime: true });
+      console.log(`  ${ui.colors.success('✓')} Scan profundo: ${deepScan.strategy} (${deepScan.triggered} jobs)`);
+    } catch (e) {
+      console.log(`  ${ui.colors.error('✗')} Scan falhou: ${e.message}`);
     }
 
     ui.NotificationManager.instance.success('Organização Komga completa!');

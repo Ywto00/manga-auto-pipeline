@@ -12,7 +12,7 @@ const { loadConfig } = require('../../../config/infra/config-store');
 const { loadLinkCache, saveLinkCache, getItemProcessKey, buildLinkCacheSignature } = require('../../../features/links/domain/auto-link-core');
 const { getCachedAutoLinkCandidates } = require('../../../features/links/domain/find-best-library-link-for-item');
 const { makeApiClient, listSources, searchSource } = require('../../../features/server/infra/suwayomi-api');
-const { readListForEnqueue } = require('../../../features/enqueue/application/enqueue-main');
+const { readListForEnqueue } = require('../domain/auto-link-core');
 
 function computeBatchTransparency(previewRows, minScore) {
   const withSuggestion = previewRows.filter(r => r.best).length;
@@ -280,6 +280,12 @@ async function checkSourcesHealth(options = {}) {
     failed,
     rows: results
   };
+}
+
+async function warmAndBuildPreview(opts = {}, deps = {}) {
+  const warm = await warmAutoLinkCache(opts);
+  const previewRows = await buildBatchAutoLinkPreview(opts);
+  return { warm, previewRows };
 }
 
 module.exports = {

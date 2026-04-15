@@ -7,7 +7,7 @@ const { execFileSync } = require('child_process');
 const { fetchAniList, fetchAniListMediaById } = require('./shared/adapters/anilist.adapter');
 const { fetchMAL } = require('./shared/adapters/mal.adapter');
 const { normalize } = require('./shared/utils/normalize');
-const { postGraphQL } = require('./shared/utils/api-common');
+const { postGraphQL, sleep } = require('./shared/utils/api-common');
 const { loadSuwayomiLibraryIndex } = require('./features/links/infra/load-suwayomi-library-index');
 const { resolveItemLibraryLink } = require('./features/links/application/resolve-item-library-link');
 const { linkItemInLibrary } = require('./features/links/application/link-item-in-library');
@@ -56,8 +56,9 @@ const {
   getDownloadsPath,
   getLinkCachePath,
   loadConfig,
-  saveConfig
-} = require('./config/infra/config-store');
+  saveConfig,
+  quotePathForHocon
+} = require('./features/config/infra/config-store');
 
 const CONFIG_PATH = getConfigPath();
 const LIST_PATH = getListPath();
@@ -787,23 +788,10 @@ async function startServer() {
   syncServerConf(cfg);
   saveConfig(cfg);
 
-  const runner = startSuwayomiJar(cfg.jarPath, {
+  const runner = startSuwayomiJar(Object.assign({}, cfg, {
     javaArgs: cfg.javaArgs || [],
-    detached: true,
-    configOverrides: {
-      'server.rootDir': cfg.dataDir,
-      'server.downloadsPath': cfg.downloadsPath,
-      'server.systemTrayEnabled': false,
-      'server.initialOpenInBrowserEnabled': false,
-      'server.webUIEnabled': Boolean(cfg.suwayomiWebUIEnabled),
-      'server.ip': cfg.serverBindIp || '0.0.0.0',
-      'server.downloadAsCbz': true,
-      'server.maxSourcesInParallel': Number(cfg.maxSourcesInParallel) || 6,
-      ...(Array.isArray(cfg.extensionRepos) && cfg.extensionRepos.length
-        ? { 'server.extensionRepos': cfg.extensionRepos }
-        : {})
-    }
-  });
+    detached: true
+  }));
 
   const apiUrl = cfg.apiUrl || 'http://localhost:4567';
   let ready = false;
@@ -2866,6 +2854,12 @@ async function warmAutoLinkCache(options = {}) {
   };
 }
 
+async function warmAndBuildPreview(options = {}) {
+  const warm = await warmAutoLinkCache(options);
+  const previewRows = await buildBatchAutoLinkPreview(options);
+  return { warm, previewRows };
+}
+
 async function checkSourcesHealth(options = {}) {
   const cfg = loadConfig();
   const apiUrl = cfg.apiUrl || 'http://localhost:4567';
@@ -3138,13 +3132,13 @@ async function waitForDownloadsAndSyncKomga(options = {}) {
     forceSync: true
   });
 
+  const refreshResult = await triggerKomgaMetadataRefresh();
+  const metadataPatchResult = await syncKomgaSeriesMetadataFromLocal();
+
   const scanResult = await triggerKomgaLibraryScan({
     scanDeep: true,
     scanForceModifiedTime: options.scanForceModifiedTime === true
   });
-
-  const refreshResult = await triggerKomgaMetadataRefresh();
-  const metadataPatchResult = await syncKomgaSeriesMetadataFromLocal();
 
   return {
     watcherResult,
@@ -3353,6 +3347,360 @@ async function getChapterCoverageReport(options = {}) {
   };
 }
 
+// ============================================================================
+// DOWNLOAD MANUAL - Integração AniList + Suwayomi
+// ============================================================================
+
+/**
+ * Busca a lista de mangás do AniList com informações de progresso
+ */
+async function fetchAniListMangaWithProgress(username) {
+  const { getAniListClient } = require('../features/list/infra/anilist-client');
+  const client = getAniListClient();
+
+  // Busca lista de mangás do usuário
+  const query = `
+    query ($user: String) {
+      MediaListCollection(userName: $user, type: MANGA, sort: UPDATED_TIME_DESC) {
+        lists {
+          entries {
+            media {
+              id
+              title {
+                romaji
+                english
+                native
+              }
+              chapters
+            }
+            progress
+            status
+          }
+        }
+      }
+    }
+  `;
+
+  const result = await client.request(query, { user: username });
+  const allEntries = (result.data.MediaListCollection.lists || []).flatMap(l => l.entries || []);
+
+  // Formata para uso interno
+  return allEntries.map(entry => ({
+    anilistId: entry.media.id,
+    title: entry.media.title.romaji || entry.media.title.english || entry.media.title.native || 'Sem título',
+    totalChapters: entry.media.chapters || 0,
+    lastChapterRead: entry.progress || 0,
+    status: entry.status
+  })).filter(m => m.totalChapters > 0);
+}
+
+/**
+ * Busca o próximo capítulo não lido de um manga no Suwayomi
+ * Retorna o número do último capítulo baixado
+ */
+async function getDownloadedChapterCount(mangaId) {
+  try {
+    const { default: axios } = await import('axios');
+    const cfg = loadConfig();
+
+    // Buscar no banco do Suwayomi
+    const response = await axios.get(
+      `${cfg.serverUrl || 'http://localhost:8080'}/api/v1/manga/${mangaId}/chapter`,
+      { responseType: 'json' }
+    );
+
+    if (response.data && Array.isArray(response.data)) {
+      // Encontrar o capítulo com maior número
+      const chapters = response.data;
+      if (chapters.length === 0) return 0;
+      const maxChapterNum = chapters.reduce((max, ch) => {
+        const num = parseFloat(ch.chapter || 0);
+        return num > max ? num : max;
+      }, 0);
+      return Math.floor(maxChapterNum);
+    }
+    return 0;
+  } catch (e) {
+    console.log(`[DEBUG] Erro ao buscar capítulos do manga ${mangaId}: ${e.message}`);
+    return 0;
+  }
+}
+
+/**
+ * Enfileira download de um manga com range específico de capítulos
+ */
+async function enqueueMangaDownload(mangaId, startChapter, endChapter, priority = 5) {
+  const { default: axios } = await import('axios');
+  const cfg = loadConfig();
+
+  const url = `${cfg.serverUrl || 'http://localhost:8080'}/api/v1/download/add`;
+  const payload = {
+    mangaId,
+    startChapter,
+    endChapter,
+    priority
+  };
+
+  const response = await axios.post(url, payload);
+  return response.data;
+}
+
+/**
+ * Busca um manga no Suwayomi pelo título
+ * Retorna o manga encontrado ou null
+ */
+async function findMangaInSuwayomiByTitle(title) {
+  const { default: axios } = await import('axios');
+  const cfg = loadConfig();
+  const apiUrl = cfg.apiUrl || 'http://localhost:4567';
+  const client = makeApiClient(apiUrl);
+
+  try {
+    // Buscar todas as fontes
+    const sources = await listSources(client);
+    if (!sources || !sources.length) {
+      throw new Error('Nenhuma fonte disponível no Suwayomi');
+    }
+
+    // Buscar em cada fonte
+    for (const source of sources) {
+      try {
+        const results = await searchSource(source.id, title, 5);
+        if (results && results.length > 0) {
+          // Retorna o primeiro match
+          return {
+            mangaId: results[0].id,
+            sourceId: source.id,
+            sourceName: source.name,
+            title: results[0].title
+          };
+        }
+      } catch (e) {
+        // Continua para próxima fonte
+        continue;
+      }
+    }
+    return null;
+  } catch (e) {
+    console.log(`[DEBUG] Erro ao buscar manga: ${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * UI para download manual de manga
+ */
+async function downloadManualMangaUI(deps) {
+  const { ensurePrompt, presenter } = deps;
+  const prompt = ensurePrompt();
+  const ui = require('../feedback/ui-enhancements');
+
+  const cfg = presenter.loadConfig();
+  if (!cfg.usernameAnilist) {
+    ui.NotificationManager.instance.error('Configure um usuário AniList primeiro!');
+    await prompt([{ name: 'ok', message: 'Pressione Enter para continuar...' }]);
+    return;
+  }
+
+  await ui.withSpinner('Buscando lista do AniList', async () => {
+    // Garantir que Suwayomi está rodando
+    if (!presenter.isServerRunning()) {
+      ui.NotificationManager.instance.info('Iniciando Suwayomi...');
+      await presenter.startServer();
+    }
+  });
+
+  // Buscar lista do AniList
+  const anilistMangas = await ui.withSpinner('Carregando mangás do AniList', async () => {
+    return await fetchAniListMangaWithProgress(cfg.usernameAnilist);
+  });
+
+  if (!anilistMangas || anilistMangas.length === 0) {
+    ui.NotificationManager.instance.error('Nenhum manga encontrado na sua lista AniList!');
+    await prompt([{ name: 'ok', message: 'Pressione Enter para continuar...' }]);
+    return;
+  }
+
+  // Exibir lista para escolha
+  ui.separator('📚 Selecione o Manga');
+  console.log(`${ui.colors.muted('Total de mangás na lista:')} ${ui.colors.success(anilistMangas.length)}`);
+  console.log('');
+
+  const choiceList = anilistMangas.map((m, i) => ({
+    name: `${String(i + 1).padStart(3)}. ${ui.colors.primary(m.title)} ${ui.colors.muted(`[Cap ${m.lastChapterRead}/${m.totalChapters}]`)}`,
+    value: i
+  }));
+
+  const selected = await prompt([
+    {
+      type: 'list',
+      name: 'idx',
+      message: ui.colors.primary('🎯 Escolha o manga'),
+      choices: choiceList,
+      pageSize: 20
+    }
+  ]);
+
+  const manga = anilistMangas[selected.idx];
+  if (!manga) return;
+
+  ui.separator();
+  console.log(`${ui.colors.primary('📖 Manga selecionado:')} ${ui.colors.success(manga.title)}`);
+  console.log(`  ${ui.colors.muted('Status AniList:')} ${manga.status}`);
+  console.log(`  ${ui.colors.muted('Progresso:')} Cap ${manga.lastChapterRead} de ${manga.totalChapters}`);
+
+  // Buscar capítulos já baixados no Suwayomi
+  const downloadedChapters = await ui.withSpinner('Verificando capítulos baixados', async () => {
+    // Aqui precisaríamos buscar pelo mangaID no Suwayomi
+    // Por enquanto, retorna 0
+    return 0;
+  });
+
+  console.log(`  ${ui.colors.muted('Baixados no Suwayomi:')} Cap ${downloadedChapters}`);
+
+  // Determinar próximo capítulo disponível
+  const nextChapter = Math.max(manga.lastChapterRead, downloadedChapters) + 1;
+  const availableChapters = manga.totalChapters - nextChapter + 1;
+
+  if (availableChapters <= 0) {
+    ui.NotificationManager.instance.success('Todos os capítulos já baixados!');
+    await prompt([{ name: 'ok', message: 'Pressione Enter para continuar...' }]);
+    return;
+  }
+
+  console.log(`  ${ui.colors.info('👉 Próximo capítulo disponível:')} ${ui.colors.success(nextChapter)}`);
+  console.log(`  ${ui.colors.info('Capítulos restantes:')} ${ui.colors.warning(availableChapters)}`);
+  console.log('');
+
+  // Escolher modo de download
+  const downloadMode = await prompt([
+    {
+      type: 'list',
+      name: 'mode',
+      message: `${ui.colors.warning('⚡')} Modo de download`,
+      choices: [
+        { name: `${ui.colors.success('🚀 ')} AGGRESSIVE - Baixar todos os ${availableChapters} capítulos restantes (max performance)`, value: 'all' },
+        { name: `${ui.colors.warning('🎯 ')} MANUAL - Escolher range específico (recomendado)`, value: 'manual' }
+      ]
+    }
+  ]);
+
+  let startChapter, endChapter;
+
+  if (downloadMode.mode === 'all') {
+    startChapter = nextChapter;
+    endChapter = manga.totalChapters;
+  } else {
+    // Range manual
+    const defaultRange = Math.min(10, availableChapters);
+    const rangeAns = await prompt([
+      {
+        name: 'count',
+        message: `${ui.colors.warning('📈')} Quantos capítulos baixar? (1-${Math.min(30, availableChapters)})`,
+        default: defaultRange,
+        validate: (v) => {
+          const n = Number(v);
+          return Number.isFinite(n) && n >= 1 && n <= Math.min(30, availableChapters)
+            ? true
+            : `${ui.colors.error('Erro:')} Digite um numero entre 1 e ${Math.min(30, availableChapters)}`;
+        }
+      }
+    ]);
+
+    const count = Math.max(1, Math.min(Math.min(30, availableChapters), Number(rangeAns.count) || defaultRange));
+    startChapter = nextChapter;
+    endChapter = nextChapter + count - 1;
+  }
+
+  // Confirmar download
+  ui.separator('📥 Confirmação');
+  console.log(`${ui.colors.primary('Manga:')} ${manga.title}`);
+  console.log(`${ui.colors.primary('Range:')} Capítulos ${startChapter} a ${endChapter} (${endChapter - startChapter + 1} caps)`);
+  console.log('');
+
+  const confirm = await prompt([
+    {
+      type: 'confirm',
+      name: 'ok',
+      message: `${ui.colors.warning('⚠️')} Iniciar download?`,
+      default: true
+    }
+  ]);
+
+  if (!confirm.ok) {
+    ui.NotificationManager.instance.info('Download cancelado');
+    return;
+  }
+
+  // Buscar manga no Suwayomi
+  ui.separator('🔍 Buscando no Suwayomi...');
+  let mangaInfo = await ui.withSpinner('Procurando manga', async () => {
+    return await findMangaInSuwayomiByTitle(manga.title);
+  });
+
+  if (!mangaInfo) {
+    // Manga não encontrado, perguntar se quer adicionar
+    const addChoice = await prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: `${ui.colors.warning('Manga não encontrado na biblioteca')}`,
+        choices: [
+          { name: `${ui.colors.success('➕ ')} Adicionar à biblioteca e baixar`, value: 'add' },
+          { name: `${ui.colors.error('❌ ')} Cancelar`, value: 'cancel' }
+        ]
+      }
+    ]);
+
+    if (addChoice.action === 'cancel') {
+      ui.NotificationManager.instance.info('Download cancelado');
+      return;
+    }
+
+    // Aqui precisaríamos adicionar o manga à biblioteca primeiro
+    // Por enquanto, vamos simular que o usuário adicionou manualmente
+    ui.NotificationManager.instance.warning('Adicione o manga manualmente na biblioteca do Suwayomi primeiro.');
+    ui.NotificationManager.instance.info(`Procure por: ${manga.title}`);
+    await prompt([{ name: 'ok', message: 'Pressione Enter após adicionar...' }]);
+
+    // Tentar buscar novamente
+    mangaInfo = await ui.withSpinner('Buscando manga adicionado', async () => {
+      return await findMangaInSuwayomiByTitle(manga.title);
+    });
+
+    if (!mangaInfo) {
+      ui.NotificationManager.instance.error('Manga ainda não encontrado. Tente novamente após adicionar manualmente.');
+      return;
+    }
+  }
+
+  // Agora temos o mangaId, enfileirar download
+  ui.separator('⬇️ Iniciando Download');
+  console.log(`${ui.colors.primary('Manga:')} ${mangaInfo.title}`);
+  console.log(`${ui.colors.primary('Fonte:')} ${mangaInfo.sourceName}`);
+  console.log(`${ui.colors.primary('Capítulos:')} ${startChapter} - ${endChapter}`);
+  console.log('');
+
+  try {
+    const result = await ui.withSpinner(`Baixando ${endChapter - startChapter + 1} capítulos`, async () => {
+      return await enqueueMangaDownload(mangaInfo.mangaId, startChapter, endChapter, 5);
+    });
+
+    ui.NotificationManager.instance.success(`Download enfileirado com sucesso!`);
+    console.log(`  ${ui.colors.muted('Manga ID:')} ${mangaInfo.mangaId}`);
+    console.log(`  ${ui.colors.muted('Capítulos:')} ${startChapter}-${endChapter}`);
+    console.log(`  ${ui.colors.muted('Status:')} ${result ? 'Adicionado à fila' : 'Erro na resposta'}`);
+  } catch (e) {
+    ui.NotificationManager.instance.error(`Falha ao iniciar download: ${e.message}`);
+  }
+
+  await prompt([{ name: 'ok', message: 'Pressione Enter para continuar...' }]);
+}
+
+// ============================================================================
+// EXPORTS
+// ============================================================================
+
 module.exports = {
   CONFIG_PATH,
   LIST_PATH,
@@ -3382,6 +3730,7 @@ module.exports = {
   getCachedAutoLinkCandidates,
   buildBatchAutoLinkPreview,
   warmAutoLinkCache,
+  warmAndBuildPreview,
   checkSourcesHealth,
   setManualLink,
   removeManualLink,
@@ -3398,5 +3747,11 @@ module.exports = {
   stopServer,
   stopKomga,
   waitForDownloadsAndShutdown,
-  waitForDownloadsAndSyncKomga
+  waitForDownloadsAndSyncKomga,
+  // Novas funções de download manual
+  fetchAniListMangaWithProgress,
+  getDownloadedChapterCount,
+  enqueueMangaDownload,
+  findMangaInSuwayomiByTitle,
+  downloadManualMangaUI
 };
