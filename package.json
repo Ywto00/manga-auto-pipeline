@@ -10,7 +10,7 @@
     "build:bin:linux": "pkg . --targets node18-linux-x64 --output dist/manga-auto-pipeline-linux",
     "build:bin:linux-arm64": "pkg . --targets node18-linux-arm64 --output dist/manga-auto-pipeline-linux-arm64",
     "build:exe:all": "pkg . --targets node18-win-x64,node18-linux-x64,node18-macos-x64 --out-path dist",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test",
     "rt": "node scripts/rename-folders-komga-test.js"
   },
   "repository": {

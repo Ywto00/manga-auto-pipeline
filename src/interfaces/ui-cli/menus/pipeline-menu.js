@@ -19,7 +19,8 @@ const { ensurePrompt } = require('../input/prompt');
 const { getLocalIPv4Candidates } = require('../system/network');
 const { chooseJarPath } = require('../input/explorer-picker');
 const { exec } = require('child_process');
-const { resolveEnqueuePrefs } = require('../../../features/pipeline/application/resolve-enqueue-prefs');
+const { resolveEnqueuePrefs } = require('../../../lib/config-utils');
+const { openInBrowser } = require('../../../lib/ui-helpers');
 const { describeError } = require('../../../features/pipeline/infra/error-utils');
 const { startBackgroundEnqueueWorker } = require('../../../features/pipeline/infra/background-enqueue-worker');
 const { ensureJarReady } = require('../../../features/pipeline/application/jar-management');
@@ -29,20 +30,6 @@ const ui = require('../feedback/ui-enhancements');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function openInBrowser(url) {
-  const target = String(url || '').trim();
-  if (!target) return;
-  if (process.platform === 'win32') {
-    exec(`start "" "${target}"`);
-    return;
-  }
-  if (process.platform === 'darwin') {
-    exec(`open "${target}"`);
-    return;
-  }
-  exec(`xdg-open "${target}"`);
 }
 
 async function startPipelineUI() {
@@ -105,7 +92,7 @@ async function startPipelineUI() {
     if (webUiEnabled && cfgNow.suwayomiOpenWebUIOnStart === true) {
       const targetUrl = `${api.protocol}//localhost:${api.port}`;
       try {
-        openInBrowser(targetUrl);
+        openInBrowser(targetUrl, exec);
         console.log(`  ${ui.colors.info('Abrindo WebUI no navegador:')} ${targetUrl}`);
       } catch (e) {
         console.log(`  ${ui.colors.warning('Não foi possível abrir navegador automaticamente:')} ${e.message}`);

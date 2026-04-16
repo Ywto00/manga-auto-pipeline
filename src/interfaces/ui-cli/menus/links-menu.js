@@ -2,10 +2,17 @@ const cliLogic = require('../../../cli-logic-adapter');
 const { ensurePrompt } = require('../input/prompt');
 const ui = require('../feedback/ui-enhancements');
 const {
-  computeBatchTransparency,
-  collectAutoSelectedKeys,
-  saveSelectedLinks
-} = require('../../../features/links/application/auto-link-batch-service');
+  scoreLabel,
+  matchPercentLabel,
+  chapterLabel,
+  linkedStateLabel,
+  colorizeFoundTitle,
+  truncateText
+} = require('../../../lib/ui-helpers');
+const {
+  filterSourcesByConfig,
+  resolveEnqueuePrefs
+} = require('../../../lib/config-utils');
 
 // Functions from cli-logic-adapter
 const {
@@ -19,6 +26,9 @@ const {
   buildBatchAutoLinkPreview,
   warmAutoLinkCache,
   warmAndBuildPreview,
+  computeBatchTransparency,
+  collectAutoSelectedKeys,
+  saveSelectedLinks,
   checkSourcesHealth,
   setManualLink,
   removeManualLink,
@@ -28,42 +38,11 @@ const {
   getAutoLinkCandidates
 } = cliLogic;
 
-const { resolveEnqueuePrefs } = require('../../../features/pipeline/application/resolve-enqueue-prefs');
-
-// Use ui.colors instead of raw ANSI codes
-function scoreLabel(score) {
-  const n = Number(score || 0);
-  if (n >= 90) return ui.colors.success(String(n));
-  if (n >= 70) return ui.colors.warning(String(n));
-  return ui.colors.error(String(n));
-}
-
-function matchPercentLabel(score) {
-  const n = Math.max(0, Math.min(100, Number(score || 0)));
-  if (n >= 90) return ui.colors.success(`${n}%`);
-  if (n >= 70) return ui.colors.warning(`${n}%`);
-  return ui.colors.error(`${n}%`);
-}
-
-function chapterLabel(hasChapters) {
-  if (hasChapters === true) return ui.colors.success('chapters:ok');
-  if (hasChapters === false) return ui.colors.error('chapters:none');
-  return ui.colors.muted('chapters:unknown');
-}
-
-function linkedStateLabel(linked) {
-  return linked ? ui.colors.success('vinculado') : ui.colors.error('sem-vinculo');
-}
-
-function colorizeFoundTitle(title) {
-  return ui.colors.info(String(title || ''));
-}
-
-function truncateText(value, max = 68) {
-  const text = String(value || '').trim();
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(0, max - 1))}...`;
-}
+// TODO(refactor-links-menu): keep this file as UI-only.
+// Next extractions for you:
+// 1) Move `runBatchAutoMatch` orchestration into a service method.
+// 2) Move `createOrUpdateLink` decision tree into links service with small UI callbacks.
+// 3) Keep only prompt/display logic here and call adapter methods.
 
 function printLinksConfigSummary(cfg) {
   const langs = Array.isArray(cfg.preferredSearchLangs) && cfg.preferredSearchLangs.length
@@ -74,25 +53,6 @@ function printLinksConfigSummary(cfg) {
   const cacheTtl = Number(cfg.linkCacheTtlMinutes || 720);
   const cleanup = cfg.cleanupLibraryDuplicates === true ? 'on' : 'off';
   console.log(`\n[CFG] langs=${langs} | maxSources=${sourceLimit} | parallel=${sourceConcurrency} | cacheTtl=${cacheTtl}m | dedupeLibrary=${cleanup}`);
-}
-
-function filterSourcesByConfig(sources, cfg) {
-  let out = Array.isArray(sources) ? [...sources] : [];
-
-  const langs = Array.isArray(cfg.preferredSearchLangs)
-    ? cfg.preferredSearchLangs.map(x => String(x || '').toLowerCase()).filter(Boolean)
-    : [];
-  if (langs.length) {
-    const langSet = new Set(langs);
-    out = out.filter(s => langSet.has(String(s && s.lang || '').toLowerCase()));
-  }
-
-  if (cfg.fixedSourceId != null && String(cfg.fixedSourceId).trim() !== '') {
-    const target = String(cfg.fixedSourceId).trim();
-    out = out.filter(s => String(s && s.id) === target);
-  }
-
-  return out;
 }
 
 async function updateAniListSnapshot(prompt) {
@@ -176,8 +136,8 @@ async function showUnifiedList(rows, prompt) {
       ? Number(r.linked.score)
       : null;
     const matchPct = r.linked
-      ? (linkedScore != null ? matchPercentLabel(linkedScore) : '--')
-      : (preview && preview.best ? matchPercentLabel(preview.best.score) : '--');
+      ? (linkedScore != null ? matchPercentLabel(linkedScore, ui) : '--')
+      : (preview && preview.best ? matchPercentLabel(preview.best.score, ui) : '--');
 
     // Status icon and color
     const isLinked = Boolean(r.linked);
@@ -195,9 +155,9 @@ async function showUnifiedList(rows, prompt) {
       } else if (preview && preview.best) {
         const bestSource = preview.best.sourceName;
         const bestTitle = truncateText(preview.best.mangaTitle, 40);
-        const score = scoreLabel(Number(preview.best.score || 0));
+        const score = scoreLabel(Number(preview.best.score || 0), ui);
         const cache = preview.cached ? ui.colors.muted('[cache]') : '';
-        console.log(`   ${ui.colors.muted('└─')} ${ui.colors.warning(bestSource)} / ${colorizeFoundTitle(bestTitle)} ${score} ${cache}`);
+        console.log(`   ${ui.colors.muted('└─')} ${ui.colors.warning(bestSource)} / ${colorizeFoundTitle(bestTitle, ui)} ${score} ${cache}`);
       } else {
         console.log(`   ${ui.colors.muted('└─')} ${ui.colors.error('Nenhuma sugestão disponível')}`);
       }
@@ -213,15 +173,15 @@ async function showUnifiedList(rows, prompt) {
       if (isLinked) {
         const linkedSource = r.linked.sourceName || r.linked.sourceId;
         const linkedTitle = r.linked.mangaTitle;
-        console.log(`   ${ui.colors.muted('Vínculo:')} ${ui.colors.success(linkedSource)} / ${colorizeFoundTitle(linkedTitle)} ${matchPct !== '--' ? ui.colors.muted(`[match:${matchPct}]`) : ''}`);
+        console.log(`   ${ui.colors.muted('Vínculo:')} ${ui.colors.success(linkedSource)} / ${colorizeFoundTitle(linkedTitle, ui)} ${matchPct !== '--' ? ui.colors.muted(`[match:${matchPct}]`) : ''}`);
       } else if (preview && preview.best) {
         const bestSource = preview.best.sourceName;
         const bestTitle = preview.best.mangaTitle;
         const score = preview.best.score;
-        const match = matchPercentLabel(score);
+        const match = matchPercentLabel(score, ui);
         const by = preview.best.matchedAgainst ? ` (by='${preview.best.matchedAgainst}')` : '';
         const cache = preview.cached ? ui.colors.muted('[cache]') : '';
-        console.log(`   ${ui.colors.muted('Sugestão:')} ${ui.colors.warning(bestSource)} / ${colorizeFoundTitle(bestTitle)} ${scoreLabel(score)} ${match}${by}${cache}`);
+        console.log(`   ${ui.colors.muted('Sugestão:')} ${ui.colors.warning(bestSource)} / ${colorizeFoundTitle(bestTitle, ui)} ${scoreLabel(score, ui)} ${match}${by}${cache}`);
       } else {
         console.log(`   ${ui.colors.muted('Sugestão:')} ${ui.colors.error('Nenhuma sugestão disponível')}`);
       }
@@ -233,7 +193,7 @@ async function showUnifiedList(rows, prompt) {
           .map(s => {
             const top = Array.isArray(s.mangas) && s.mangas[0] ? s.mangas[0] : null;
             if (!top) return `${s.sourceName}[${s.lang}]`;
-            return `${s.sourceName}[${s.lang}]: ${scoreLabel(top.score)} ${chapterLabel(top.hasChapters)}`;
+            return `${s.sourceName}[${s.lang}]: ${scoreLabel(top.score, ui)} ${chapterLabel(top.hasChapters, ui)}`;
           })
           .join(' | ');
         console.log(`   ${ui.colors.muted('Fontes:')} ${sourcesLine}`);
@@ -623,7 +583,7 @@ async function createOrUpdateLink(rows, prompt) {
       message: 'Escolha o manga da sua lista',
       pageSize: 20,
       choices: filteredRows.map(r => ({
-        name: `${linkedStateLabel(r.linked)} ${truncateText(r.item.title, 60)}${r.linked ? ` -> ${truncateText(r.linked.sourceName || r.linked.sourceId, 24)}` : ''}`,
+        name: `${linkedStateLabel(r.linked, ui)} ${truncateText(r.item.title, 60)}${r.linked ? ` -> ${truncateText(r.linked.sourceName || r.linked.sourceId, 24)}` : ''}`,
         value: r.key
       }))
     }
@@ -644,7 +604,7 @@ async function createOrUpdateLink(rows, prompt) {
   console.log(`[ITEM] Vinculo atual: ${runtimeLink}`);
   if (runtime && runtime.linked) {
     if (runtime.ok) {
-      console.log(`[ITEM] Suwayomi: ${chapterLabel(runtime.hasChapters)} | baixados=${ui.colors.success(String(runtime.downloadedCount || 0))} / total=${runtime.chapterCount || 0} | maxCap=${runtime.maxDownloaded || 0}`);
+      console.log(`[ITEM] Suwayomi: ${chapterLabel(runtime.hasChapters, ui)} | baixados=${ui.colors.success(String(runtime.downloadedCount || 0))} / total=${runtime.chapterCount || 0} | maxCap=${runtime.maxDownloaded || 0}`);
     } else {
       console.log(`[ITEM] Suwayomi: ${ui.colors.error('erro ao consultar')} (${runtime.error || 'erro desconhecido'})`);
     }
