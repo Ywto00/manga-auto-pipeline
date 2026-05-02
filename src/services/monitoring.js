@@ -1,8 +1,10 @@
-const { getDownloadsOverview, checkSourcesHealth } = require('../cli-logic-adapter');
-const { startBackgroundEnqueueWorker } = require('../features/pipeline/infra/background-enqueue-worker');
-const { runEnqueueBackgroundTask } = require('../features/pipeline/application/enqueue-background-task');
+const { getDownloadsOverview } = require('../cli-logic-adapter');
+const { checkSourcesHealth } = require('../services/auto-link-batch-service');
+const { startBackgroundEnqueueWorker } = require('../infra/pipeline/background-enqueue-worker');
+const { runEnqueueBackgroundTask } = require('../services/pipeline/enqueue-background-task');
 
 class MonitoringService {
+
   constructor() {
     this.worker = null;
   }
@@ -16,7 +18,7 @@ class MonitoringService {
     }
   }
 
-  async checkSourcesHealth(opts = {}) {
+  async runHealthCheck(opts = {}) {
     try {
       const result = await checkSourcesHealth(opts);
       return { ok: true, result };
@@ -24,6 +26,9 @@ class MonitoringService {
       return { ok: false, error: error.message };
     }
   }
+
+  async checkSourcesHealth(opts = {}) {
+
 
   async startBackgroundWorker(cfg) {
     try {
@@ -40,7 +45,7 @@ class MonitoringService {
       await runEnqueueBackgroundTask(cfg, {
         fetchUserList: require('../cli-logic-adapter').fetchUserList,
         enqueueFromList: require('../cli-logic-adapter').enqueueFromList,
-        resolveEnqueuePrefs: require('../features/pipeline/application/resolve-enqueue-prefs').resolveEnqueuePrefs,
+        resolveEnqueuePrefs: require('../services/pipeline/resolve-enqueue-prefs').resolveEnqueuePrefs,
         logger: console
       });
       return { ok: true };

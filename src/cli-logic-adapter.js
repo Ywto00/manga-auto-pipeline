@@ -1,19 +1,19 @@
-const configStore = require('./services/config-store');
-const { applyConfigValues, isConfigComplete } = require('./features/settings/infra/config-validation');
+const configStore = require('./infra/config/config-store');
+const { applyConfigValues, isConfigComplete } = require('./infra/settings/config-validation');
 const { postGraphQL } = require('./shared/utils/api-common');
-const { fetchAniList, fetchAniListMediaById } = require('./features/sync/infra/anilist-adapter');
-const { fetchUserList } = require('./features/sync/application/fetch-user-list');
-const { getDownloadsOverview } = require('./features/pipeline/application/downloads-overview');
-const { isServerRunning, isKomgaRunning } = require('./features/server/application/process-state');
-const { deleteReadChaptersByAniList } = require('./features/cleanup/application/delete-read-chapters');
+const { fetchAniList, fetchAniListMediaById } = require('./infra/sync/anilist-adapter');
+const { fetchUserList } = require('./services/sync-service');
+const { getDownloadsOverview } = require('./services/pipeline/downloads-overview');
+const { isServerRunning, isKomgaRunning } = require('./services/server/process-state');
+const { deleteReadChaptersByAniList } = require('./services/cleanup-service');
 
-const suwayomiApi = require('./features/server/infra/suwayomi-api');
+const suwayomiApi = require('./infra/server/suwayomi-api');
 const {
   startSuwayomiJar,
   waitForSuwayomiReady,
   syncServerConf,
   quotePathForHocon
-} = require('./features/server/infra/suwayomi-runner');
+} = require('./infra/server/suwayomi-runner');
 const {
   startServer,
   startKomga,
@@ -21,23 +21,23 @@ const {
   stopServer,
   stopKomga,
   waitForDownloadsAndSyncKomga
-} = require('./features/server/application/server-lifecycle');
+} = require('./services/server/server-lifecycle');
 
 const {
   waitForKomgaReady,
   moveJarToManaged
-} = require('./features/komga/infra/komga-runner');
+} = require('./infra/komga/komga-runner');
 
 const {
   organizeDownloadsForKomga
-} = require('./features/komga/infra/komga-organizer');
+} = require('./infra/komga/komga-organizer');
 
 const {
   ensureKomgaLibraryExists,
   triggerKomgaLibraryScan,
   triggerKomgaMetadataRefresh,
   syncKomgaSeriesMetadataFromLocal
-} = require('./features/komga/infra/komga-api');
+} = require('./infra/komga/komga-api');
 
 const {
   listMangaItemsForManualLink,
@@ -49,7 +49,7 @@ const {
   warmAutoLinkCache,
   setManualLink,
   removeManualLink
-} = require('./services/autolink');
+} = require('./services/auto-link-service');
 
 const {
   computeBatchTransparency,
@@ -57,13 +57,13 @@ const {
   saveSelectedLinks,
   warmAndBuildPreview,
   checkSourcesHealth
-} = require('./features/links/application/auto-link-batch-service');
+} = require('./services/auto-link-batch-service');
 
-const { buildWantedChapterNumbers } = require('./features/enqueue/domain/enqueue-utils');
-const { resolveEnqueuePrefs } = require('./features/pipeline/application/resolve-enqueue-prefs');
-const { startBackgroundEnqueueWorker } = require('./features/pipeline/infra/background-enqueue-worker');
-const { runEnqueueBackgroundTask } = require('./features/pipeline/application/enqueue-background-task');
-const { EnqueueService } = require('./services/enqueue');
+const { buildWantedChapterNumbers } = require('./domain/enqueue/enqueue-utils');
+const { resolveEnqueuePrefs } = require('./services/pipeline/resolve-enqueue-prefs');
+const { startBackgroundEnqueueWorker } = require('./infra/pipeline/background-enqueue-worker');
+const { runEnqueueBackgroundTask } = require('./services/pipeline/enqueue-background-task');
+const { EnqueueService } = require('./services/enqueue-service');
 
 const loadConfig = () => configStore.loadConfig();
 const saveConfig = (cfg) => configStore.saveConfig(cfg);

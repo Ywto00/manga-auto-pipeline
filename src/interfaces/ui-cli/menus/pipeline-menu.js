@@ -15,17 +15,20 @@ const {
   syncKomgaSeriesMetadataFromLocal,
   waitForDownloadsAndSyncKomga
 } = require('../../../cli-logic-adapter');
+const { initializePipeline } = require('../../../services/pipeline/pipeline-orchestrator');
+const { organizeLibraryFlow, startKomgaFlow } = require('../../../services/pipeline/komga-orchestrator');
+const { cleanupReadChaptersFlow } = require('../../../services/pipeline/cleanup-orchestrator');
 const { ensurePrompt } = require('../input/prompt');
 const { getLocalIPv4Candidates } = require('../system/network');
 const { chooseJarPath } = require('../input/explorer-picker');
 const { exec } = require('child_process');
 const { resolveEnqueuePrefs } = require('../../../lib/config-utils');
 const { openInBrowser } = require('../../../lib/ui-helpers');
-const { describeError } = require('../../../features/pipeline/infra/error-utils');
-const { startBackgroundEnqueueWorker } = require('../../../features/pipeline/infra/background-enqueue-worker');
-const { ensureJarReady } = require('../../../features/pipeline/application/jar-management');
-const { runEnqueueBackgroundTask } = require('../../../features/pipeline/application/enqueue-background-task');
-const { runKomgaPostStartTasks, runKomgaPostStartWhenReady } = require('../../../features/pipeline/application/komga-post-start');
+const { describeError } = require('../../../lib/errors');
+const { startBackgroundEnqueueWorker } = require('../../../infra/pipeline/background-enqueue-worker');
+const { ensureJarReady } = require('../../../services/pipeline/jar-management');
+const { runEnqueueBackgroundTask } = require('../../../services/pipeline/enqueue-background-task');
+const { runKomgaPostStartTasks, runKomgaPostStartWhenReady } = require('../../../services/pipeline/komga-post-start');
 const ui = require('../feedback/ui-enhancements');
 
 function sleep(ms) {
@@ -173,69 +176,26 @@ async function cleanupReadByAniListUI() {
   const prompt = ensurePrompt();
   ui.separator('🧹 Limpeza de Capítulos Lidos (AniList)');
 
-  try {
-    const ans = await prompt([
-      {
-        type: 'confirm',
-        name: 'dry',
-        message: 'Executar em dry-run (apenas mostrar, sem apagar)?',
-        default: true
-      },
-      {
-        name: 'limit',
-        message: 'Quantidade máxima de mangás para processar',
-        default: 200,
-        validate: (v) => {
-          const n = Number(v);
-          return Number.isFinite(n) && n >= 1 ? true : 'Digite um número >= 1';
-        }
-      }
-    ]);
+  const result = await cleanupReadChaptersFlow({
+    prompt,
+    ui
+  });
 
-    const dry = Boolean(ans.dry);
-    const limit = Number(ans.limit) || 200;
-
-    console.log('');
-    ui.NotificationManager.instance.info(`Varredura de capítulos lidos (dry-run: ${dry ? 'sim' : 'não'}, limite: ${limit})`);
-
-    let processed = 0, deletedTotal = 0, failedTotal = 0, skipped = 0;
-    const startTime = Date.now();
-
-    const result = await deleteReadChaptersByAniList({
-      dry,
-      limit,
-      onItem: (row) => {
-        processed += 1;
-        if (row.skipped) {
-          skipped += 1;
-          if (processed <= 50) console.log(`  ${ui.colors.muted('SKIP')} ${row.item.title} (${row.reason})`);
-          return;
-        }
-        if (row.ok === false) {
-          failedTotal += 1;
-          if (processed <= 50) console.log(`  ${ui.colors.error('FAIL')} ${row.item.title}: ${row.error}`);
-          return;
-        }
-        deletedTotal += (row.deleted || 0);
-        if (processed <= 50) {
-          console.log(`  ${ui.colors.success('OK')} ${row.item.title}: ${row.candidates} capítulos candidatos, ${row.deleted} apagados${row.dry ? ' [DRY]' : ''}`);
-        }
-      }
-    });
-
-    const elapsed = (Date.now() - startTime) / 1000;
-    ui.separator('Resultado da Limpeza');
-    console.log(`  Tempo: ${elapsed.toFixed(1)}s`);
-    console.log(`  Processados: ${ui.colors.info(processed)} itens`);
-    console.log(`  Apagados: ${ui.colors.success(deletedTotal)} capítulos`);
-    console.log(`  Falhas: ${ui.colors.error(failedTotal)} itens`);
-    console.log(`  Ignorados: ${ui.colors.muted(skipped)} itens`);
-
-    ui.NotificationManager.instance.success(`Limpeza concluída: ${deletedTotal} capítulos apagados de ${processed} mangás verificados`);
-
-  } catch (e) {
-    ui.NotificationManager.instance.error(`Falha na limpeza: ${e.message}`);
+  if (!result.success) {
+    ui.NotificationManager.instance.error(`Falha na limpeza: ${result.error}`);
+    return;
   }
+
+  const { elapsed, processed, deletedTotal, failedTotal, skipped } = result;
+
+  ui.separator('Resultado da Limpeza');
+  console.log(`  Tempo: ${elapsed.toFixed(1)}s`);
+  console.log(`  Processados: ${ui.colors.info(processed)} itens`);
+  console.log(`  Apagados: ${ui.colors.success(deletedTotal)} capítulos`);
+  console.log(`  Falhas: ${ui.colors.error(failedTotal)} itens`);
+  console.log(`  Ignorados: ${ui.colors.muted(skipped)} itens`);
+
+  ui.NotificationManager.instance.success(`Limpeza concluída: ${deletedTotal} capítulos apagados de ${processed} mangás verificados`);
 }
 
 async function downloadsStatusUI() {
@@ -379,111 +339,52 @@ async function downloadsStatusUI() {
 
 async function organizeKomgaLibraryUI() {
   const prompt = ensurePrompt();
-  const cfg = loadConfig();
-  const defaultMode = cfg.komgaOrganizeMode === 'copy' ? 'copy' : 'hardlink';
-  const defaultGhost = cfg.komgaCreateGhostFolders === true;
-  const defaultMeta = cfg.komgaCreateSeriesMetadata !== false;
-  const defaultCover = cfg.komgaCreateSeriesCover !== false;
-
   ui.separator('📚 Organizar Biblioteca Komga');
 
-  try {
-    const ans = await prompt([
-      {
-        type: 'list',
-        name: 'mode',
-        message: 'Modo de organização',
-        choices: [
-          { name: 'Hardlink (recomendado - economiza espaço)', value: 'hardlink' },
-          { name: 'Copy (cria cópias independentes)', value: 'copy' }
-        ],
-        default: defaultMode
-      },
-      {
-        type: 'confirm',
-        name: 'createGhost',
-        message: 'Criar pastas fantasma para séries sem arquivos?',
-        default: defaultGhost
-      },
-      {
-        type: 'confirm',
-        name: 'createMetadata',
-        message: 'Gerar series.json com metadados do AniList?',
-        default: defaultMeta
-      },
-      {
-        type: 'confirm',
-        name: 'createCover',
-        message: 'Gerar capas das séries?',
-        default: defaultCover
-      }
-    ]);
+  const result = await organizeLibraryFlow({
+    prompt,
+    ui
+  });
 
-    const options = {
-      mode: ans.mode,
-      createGhostFolders: ans.createGhost,
-      createSeriesMetadata: ans.createMetadata,
-      createSeriesCover: ans.createCover,
-      forceSync: true
-    };
-
-    ui.NotificationManager.instance.info('Organizando biblioteca Komga...');
-    const result = await ui.withSpinner('Varredura e organização em andamento', async () => {
-      return await organizeDownloadsForKomga(options);
-    });
-
-    // Save preferences
-    applyConfigValues({
-      komgaOrganizeMode: ans.mode,
-      komgaCreateGhostFolders: ans.createGhost,
-      komgaCreateSeriesMetadata: ans.createMetadata,
-      komgaCreateSeriesCover: ans.createCover
-    });
-
-    ui.separator('✅ Organização Concluída');
-    console.log(`  Biblioteca: ${result.libraryRoot}`);
-    console.log(`  Modo: ${result.mode}`);
-    console.log(`  CBZ encontrados: ${result.foundCbz}`);
-    console.log(`  Links: ${ui.colors.success(result.linked)} | Copiados: ${result.copied} | Ignorados: ${result.skipped}`);
-    console.log(`  Séries: ${result.seriesCount} | Pastas fantasma: ${result.ghostFolders}`);
-    console.log(`  series.json: ${result.metadataCreated} gerados`);
-    console.log(`  Capas: ${result.coverCreated} geradas`);
-
-    if (result.skippedByRecentSync) {
-      console.log(`\n${ui.colors.warning('⚠️  AVISO')}: Organização ignorada - última sincronização foi hoje (${result.lastSyncAt || 'agora'}).`);
-      console.log('  Para sincronizar novamente no mesmo dia, ajuste manualmente lastKomgaLibrarySyncAt no config.');
-      return;
-    }
-
-    // Trigger Komga operations (lightweight first, heavy scan last)
-    console.log('\n🔄 Atualizando Komga...');
-
-    try {
-      const refresh = await triggerKomgaMetadataRefresh();
-      console.log(`  ${ui.colors.success('✓')} Refresh metadata: ${refresh.strategy} (${refresh.triggered} jobs)`);
-    } catch (e) {
-      console.log(`  ${ui.colors.error('✗')} Refresh falhou: ${e.message}`);
-    }
-
-    try {
-      const patched = await syncKomgaSeriesMetadataFromLocal();
-      console.log(`  ${ui.colors.success('✓')} Metadata API: ${patched.patched}/${patched.attempted} atualizadas, ${patched.skipped} sem match, ${patched.failed} falhas`);
-    } catch (e) {
-      console.log(`  ${ui.colors.error('✗')} Metadata API falhou: ${e.message}`);
-    }
-
-    try {
-      const deepScan = await triggerKomgaLibraryScan({ scanDeep: true, scanForceModifiedTime: true });
-      console.log(`  ${ui.colors.success('✓')} Scan profundo: ${deepScan.strategy} (${deepScan.triggered} jobs)`);
-    } catch (e) {
-      console.log(`  ${ui.colors.error('✗')} Scan falhou: ${e.message}`);
-    }
-
-    ui.NotificationManager.instance.success('Organização Komga completa!');
-
-  } catch (e) {
-    ui.NotificationManager.instance.error(`Falha ao organizar Komga: ${e.message}`);
+  if (!result.success) {
+    ui.NotificationManager.instance.error(`Falha ao organizar Komga: ${result.error}`);
+    return;
   }
+
+  const { organizeResult, opResults } = result;
+
+  ui.separator('✅ Organização Concluída');
+  console.log(`  Biblioteca: ${organizeResult.libraryRoot}`);
+  console.log(`  Modo: ${organizeResult.mode}`);
+  console.log(`  CBZ encontrados: ${organizeResult.foundCbz}`);
+  console.log(`  Links: ${ui.colors.success(organizeResult.linked)} | Copiados: ${organizeResult.copied} | Ignorados: ${organizeResult.skipped}`);
+  console.log(`  Séries: ${organizeResult.seriesCount} | Pastas fantasma: ${organizeResult.ghostFolders}`);
+  console.log(`  series.json: ${organizeResult.metadataCreated} gerados`);
+  console.log(`  Capas: ${organizeResult.coverCreated} geradas`);
+
+  if (organizeResult.skippedByRecentSync) {
+    console.log(`\n${ui.colors.warning('⚠️  AVISO')}: Organização ignorada - última sincronização foi hoje (${organizeResult.lastSyncAt || 'agora'}).`);
+    console.log('  Para sincronizar novamente no mesmo dia, ajuste manualmente lastKomgaLibrarySyncAt no config.');
+    return;
+  }
+
+  console.log('\n🔄 Atualizando Komga...');
+  opResults.forEach(op => {
+    if (op.error) {
+      console.log(`  ${ui.colors.error('✗')} ${op.type}: ${op.error}`);
+    } else {
+      const res = op.result;
+      if (op.type === 'refresh') {
+        console.log(`  ${ui.colors.success('✓')} Refresh metadata: ${res.strategy} (${res.triggered} jobs)`);
+      } else if (op.type === 'metadata') {
+        console.log(`  ${ui.colors.success('✓')} Metadata API: ${res.patched}/${res.attempted} atualizadas, ${res.skipped} sem match, ${res.failed} falhas`);
+      } else if (op.type === 'scan') {
+        console.log(`  ${ui.colors.success('✓')} Scan profundo: ${res.strategy} (${res.triggered} jobs)`);
+      }
+    }
+  });
+
+  ui.NotificationManager.instance.success('Organização Komga completa!');
 }
 
 async function startKomgaUI() {

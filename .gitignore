@@ -151,4 +151,6 @@ vite.config.ts.timestamp-*
 # Project Markdown files (except README)
 *.md
 !README.md
+REFTACTORING_SUMMARY.md
+
 

@@ -1,5 +1,5 @@
 const { normalize } = require('../../shared/utils/normalize');
-const { getDataPaths } = require('../../config/infra/config-store');
+const { getDataPaths } = require('../infra/config/config-store');
 const fs = require('fs');
 const path = require('path');
 

@@ -1,4 +1,4 @@
-const { runSearchSettingsFlow } = require('../../../features/settings/ui/search-settings-flow');
+const { runSearchSettingsFlow } = require('../../../ui/settings/search-settings-flow');
 
 module.exports = function createSettingsSearchMenu(deps) {
   async function settingsSearchMenu() {

@@ -2,7 +2,7 @@
  * Central config helper: delegate to the feature module config-store.
  * This keeps old require calls (e.g. from bootstrap-cli.js) working.
  */
-const { loadConfig, saveConfig, isConfigComplete, syncServerConf } = require('../features/config/infra/config-store');
+const { loadConfig, saveConfig, isConfigComplete, syncServerConf } = require('../infra/config/config-store');
 
 function getConfig() {
   return loadConfig();
